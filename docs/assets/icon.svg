@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Sleeper — release-gate mark: a multi-year orbit of events converging on a held gate">
+  <defs>
+    <!-- var(token, #fallback) pattern: standalone rasterization uses the hex;
+         embedded in an app with _tokens.css loaded, brand CSS vars win. -->
+    <linearGradient id="ringGrad" x1="1" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="var(--primary, #FFB224)"/>
+      <stop offset="100%" stop-color="var(--accent, #7C5CFF)"/>
+    </linearGradient>
+    <linearGradient id="barGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="var(--primary, #FFB224)"/>
+      <stop offset="100%" stop-color="var(--accent, #7C5CFF)"/>
+    </linearGradient>
+    <radialGradient id="coreGlow" cx="0.5" cy="0.42" r="0.75">
+      <stop offset="0%" stop-color="#141B33"/>
+      <stop offset="100%" stop-color="#0A0F1D"/>
+    </radialGradient>
+    <filter id="dotGlow" x="-120%" y="-120%" width="340%" height="340%">
+      <feGaussianBlur stdDeviation="7" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Orbit path hint (the memory arc) -->
+  <circle cx="256" cy="256" r="206" fill="none"
+          stroke="var(--accent, #7C5CFF)" stroke-opacity="0.18"
+          stroke-width="2.5" stroke-dasharray="2.5 9" stroke-linecap="round"/>
+
+  <!-- Memory trail: years of events, oldest (violet, small) to newest (amber, large) -->
+  <circle cx="62.4"  cy="185.5" r="9"  fill="var(--accent, #7C5CFF)"  fill-opacity="0.55"/>
+  <circle cx="123.5" cy="98.2"  r="12" fill="var(--accent, #7C5CFF)"  fill-opacity="0.75"/>
+  <circle cx="220.2" cy="53.1"  r="15" fill="#A98BFF"/>
+  <circle cx="326.5" cy="62.4"  r="19" fill="#E0A24C"/>
+  <circle cx="413.8" cy="123.5" r="24" fill="var(--primary, #FFB224)" filter="url(#dotGlow)"/>
+
+  <!-- Gate ring -->
+  <circle cx="256" cy="256" r="146" fill="url(#coreGlow)"/>
+  <circle cx="256" cy="256" r="146" fill="none" stroke="url(#ringGrad)" stroke-width="24"/>
+
+  <!-- HOLD glyph (pause bars) -->
+  <rect x="210" y="200" width="36" height="112" rx="18" fill="url(#barGrad)"/>
+  <rect x="266" y="200" width="36" height="112" rx="18" fill="url(#barGrad)"/>
+</svg>
