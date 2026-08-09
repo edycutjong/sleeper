@@ -1,0 +1,30 @@
+{
+  "name": "sleeper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A release-gate agent whose multi-year memory of every commit, email and maintainer change recognises a slow-motion supply-chain takeover and atomically holds the poisoned release.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "schema": "tsx scripts/schema.ts",
+    "spike": "tsx scripts/spike.ts",
+    "seed": "tsx scripts/seed.ts",
+    "explain": "tsx scripts/explain.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.658.0",
+    "dotenv": "^16.4.5",
+    "pg": "^8.13.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.5",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.3"
+  }
+}

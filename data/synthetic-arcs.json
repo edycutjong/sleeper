@@ -1,0 +1,93 @@
+{
+  "provenance": {
+    "note": "SYNTHETIC. These maintainer arcs were written for this project; they describe no real person or project. They exist so the retrieval mechanic can be measured on data that is not the xz timeline.",
+    "split": "`playbook` arcs are inserted into takeover_playbook and are what an incoming arc is matched against. `heldout` arcs are NEVER inserted and are never used to pick a threshold — they are the evaluation queries. Keeping them apart is the whole point: matching the xz arc against a playbook that contains the xz arc would prove nothing.",
+    "labels": "takeover = a slow trust-acquisition arc ending in control of release engineering. benign = an ordinary contributor arc, including ones that superficially resemble a takeover (fast rise, maintainer handover, new account) so the metric is not trivially winnable."
+  },
+
+  "playbook": [
+    {
+      "id": "syn-takeover-01",
+      "label": "takeover",
+      "arc_summary": "A contributor with no prior public history begins submitting small, competent patches to a long-neglected library. Within months they are the most responsive participant. Two other accounts, also with no history, appear on the mailing list and push the exhausted sole maintainer to hand over control, contributing no code themselves. The maintainer names the new contributor as successor. Commit access follows, then release-signing authority. The pressure accounts fall silent immediately afterward."
+    },
+    {
+      "id": "syn-takeover-02",
+      "label": "takeover",
+      "arc_summary": "An established but dormant package changes hands after its author posts about burnout. The incoming maintainer's account is nine months old. Their early commits are unremarkable; their later ones concentrate on the build system and CI configuration rather than the library's actual functionality. They disable a sanitizer check, citing false positives, and alter the project's registered security contact address to one they control."
+    },
+    {
+      "id": "syn-takeover-03",
+      "label": "takeover",
+      "arc_summary": "A dependency used widely in embedded firmware acquires a prolific new contributor. Over eighteen months they refactor the release tooling, introduce an optional native code path justified on performance grounds, and become the sole person who produces distribution tarballs. A second low-history account contributes the groundwork for that native path and later lobbies downstream packagers to adopt the new release quickly."
+    },
+    {
+      "id": "syn-takeover-04",
+      "label": "takeover",
+      "arc_summary": "A cryptography helper library's maintainer is publicly criticized for slow review turnaround by two accounts that have never filed a patch. A third account offers to help and is welcomed. Trust escalates unusually fast — from first contribution to co-maintainer in under a year. The new co-maintainer's changes cluster in packaging scripts and test fixtures, including binary blobs added as corpus files."
+    },
+    {
+      "id": "syn-benign-01",
+      "label": "benign",
+      "arc_summary": "A long-time contributor who has worked on the project for six years gradually takes over maintenance as the original author moves to other work. The handover is discussed openly over a year, the contributor's identity is well known in the ecosystem, and their commits span the full breadth of the codebase rather than concentrating on build tooling."
+    },
+    {
+      "id": "syn-benign-02",
+      "label": "benign",
+      "arc_summary": "A company assigns an engineer to maintain an open-source library it depends on. The engineer is new to the project and ramps up quickly, becoming a committer within four months. Their employer is stated publicly, their contributions are reviewed by colleagues, and the original maintainer remains active and involved throughout."
+    },
+    {
+      "id": "syn-benign-03",
+      "label": "benign",
+      "arc_summary": "A student begins contributing during a mentored open-source program, continues after it ends, and over two years becomes a trusted reviewer. Contributions are consistently in the project's core logic and documentation. The maintainer remains the sole release signer; no pressure campaign appears on the mailing list at any point."
+    },
+    {
+      "id": "syn-benign-04",
+      "label": "benign",
+      "arc_summary": "An abandoned parsing library is adopted by a new maintainer after a public call for volunteers. The new maintainer works substantially on the build system — modernizing autotools, fixing cross-compilation, reworking CI — because that is what the project most needed. All work is in public pull requests with external review, and the original author endorses the handover on their own blog."
+    }
+  ],
+
+  "heldout": [
+    {
+      "id": "held-takeover-01",
+      "label": "takeover",
+      "arc_summary": "A compression utility bundled into most server images gains a contributor whose account was created the same month as their first patch. Over roughly two years they answer issues, fix bugs, and earn a reputation for reliability. Meanwhile two accounts with no other footprint repeatedly press the original author about unmerged patches and the need for new leadership. The author, citing personal difficulty, names the contributor as a likely successor. The contributor gains commit rights, then produces the release tarballs, then modifies the autotools files that only exist in the tarball and not in the repository."
+    },
+    {
+      "id": "held-takeover-02",
+      "label": "takeover",
+      "arc_summary": "A widely-vendored JSON library sees a new contributor arrive after a period of maintainer inactivity. Their patches are correct and welcome. Eleven months in they are granted merge rights. Their subsequent work is concentrated in the packaging pipeline; they request that an upstream fuzzing service stop testing a specific code path, and they redirect the project's vulnerability-reporting address."
+    },
+    {
+      "id": "held-takeover-03",
+      "label": "takeover",
+      "arc_summary": "A rebranded account — previously active under a different name in an unrelated ecosystem — becomes a heavy contributor to a TLS helper package. Two sockpuppet accounts amplify their credibility in downstream distribution bug trackers, urging fast adoption of the release they produce. The maintainer of record has not made a commit in eight months."
+    },
+    {
+      "id": "held-takeover-04",
+      "label": "takeover",
+      "arc_summary": "A logging library used by several server frameworks acquires a maintainer through an unsolicited offer of help. Trust escalates from first contact to release authority in ten months. Their commits touch the test corpus and the release script far more than the library itself, and a second new account supplies an indirect-dispatch mechanism shortly before the first release the new maintainer signs."
+    },
+    {
+      "id": "held-benign-01",
+      "label": "benign",
+      "arc_summary": "A maintainer who has run a date-handling library alone for eight years finally accepts a co-maintainer: a contributor who has been filing careful bug reports and patches for three years under a well-established identity with a long history across several other projects. Release signing stays shared. No third-party accounts appear to advocate for the change."
+    },
+    {
+      "id": "held-benign-02",
+      "label": "benign",
+      "arc_summary": "After a security incident unrelated to any contributor, a project overhauls its build and release process. One contributor does most of that work, so their commit history for the year is dominated by packaging, CI, and reproducibility changes. Every change is reviewed by two other maintainers and discussed in public issues before implementation."
+    },
+    {
+      "id": "held-benign-03",
+      "label": "benign",
+      "arc_summary": "A new contributor rises unusually fast — first patch to committer in five months — because they are a recognized expert in the library's problem domain and their identity is verifiable through conference talks and prior published work. The existing maintainers actively recruited them. Their commits are spread across parsing, tests, and documentation."
+    },
+    {
+      "id": "held-benign-04",
+      "label": "benign",
+      "arc_summary": "An aging maintainer publicly asks for succession help, citing health. A contributor of two years steps forward and is accepted. The transition is announced on the project blog and the distribution mailing lists, the outgoing maintainer stays on as a reviewer, and release keys are rotated in a documented, publicly verifiable ceremony."
+    }
+  ]
+}

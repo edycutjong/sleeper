@@ -1,0 +1,210 @@
+{
+  "package_id": "xz-utils",
+  "provenance": {
+    "note": "Reconstructed from the PUBLIC record of CVE-2024-3094: the tukaani-project/xz git history, the xz-devel mailing-list archives, the google/oss-fuzz pull requests, and Andres Freund's 2024-03-29 oss-security disclosure. Event text is a faithful paraphrase or direct quotation of public material, not invented content.",
+    "primary_sources": [
+      "https://www.openwall.com/lists/oss-security/2024/03/29/4",
+      "https://www.mail-archive.com/xz-devel@tukaani.org/",
+      "https://github.com/tukaani-project/xz",
+      "https://research.swtch.com/xz-timeline",
+      "https://boehs.org/node/everything-i-know-about-the-xz-backdoor"
+    ],
+    "accuracy": "Dates marked approximate:true are reconstructions where public sources give a window rather than a precise day. Everything else carries a day-level public citation.",
+    "usage": "This file is the GROUND-TRUTH HERO REPLAY. It is deliberately NOT used to compute the reported recall/false-positive metrics — those are measured only on the held-out synthetic arcs in synthetic-arcs.json. See DEMO.md."
+  },
+  "actors": {
+    "lasse-collin": "Lasse Collin (Larhzu) — original author and long-time sole maintainer of xz-utils.",
+    "jia-tan": "'Jia Tan' (GitHub: JiaT75) — the account that spent ~2.5 years building trust and ultimately shipped the backdoor.",
+    "jigar-kumar": "'Jigar Kumar' — sockpuppet account whose only known activity is pressuring Collin to hand over maintainership. No other trace in any project.",
+    "dennis-ens": "'Dennis Ens' — second pressure account, same pattern, no other project history.",
+    "hans-jansen": "'Hans Jansen' — account that contributed the IFUNC machinery the backdoor later relied on, then lobbied Debian to ship the backdoored release.",
+    "andres-freund": "Andres Freund — PostgreSQL developer who found the backdoor by investigating ~500ms of unexplained sshd latency."
+  },
+  "events": [
+    {
+      "actor_id": "lasse-collin",
+      "kind": "commit",
+      "occurred_at": "2021-06-15T00:00:00Z",
+      "approximate": true,
+      "content": "Routine solo maintenance on xz-utils by the long-time sole maintainer: build fixes, translation updates, small portability corrections. Cadence is slow and irregular; the project has effectively one active maintainer and a years-long backlog of unreviewed mailing-list patches.",
+      "source_url": "https://github.com/tukaani-project/xz/commits/master"
+    },
+    {
+      "actor_id": "jia-tan",
+      "kind": "email",
+      "occurred_at": "2021-10-29T00:00:00Z",
+      "approximate": true,
+      "content": "First recorded public activity of the JiaT75 account. Opens with unremarkable, small, technically-correct contributions to open-source projects. Nothing in the content is objectionable; the account simply has no history before this date.",
+      "source_url": "https://research.swtch.com/xz-timeline"
+    },
+    {
+      "actor_id": "jia-tan",
+      "kind": "email",
+      "occurred_at": "2022-04-19T00:00:00Z",
+      "content": "Submits a patch to the xz-devel mailing list. The patch is small, plausible and technically competent. Lasse Collin responds normally and engages with the contribution.",
+      "source_url": "https://www.mail-archive.com/xz-devel@tukaani.org/msg00559.html"
+    },
+    {
+      "actor_id": "jigar-kumar",
+      "kind": "email",
+      "occurred_at": "2022-04-22T00:00:00Z",
+      "content": "An account with no prior history in the project appears on xz-devel and immediately applies schedule pressure about unmerged patches, framing the maintainer's pace as the problem. Its first-ever message is about maintainership, not about code.",
+      "source_url": "https://www.mail-archive.com/xz-devel@tukaani.org/msg00563.html"
+    },
+    {
+      "actor_id": "jia-tan",
+      "kind": "commit",
+      "occurred_at": "2022-05-05T00:00:00Z",
+      "approximate": true,
+      "content": "Continues submitting genuinely useful patches. Code quality is good, review comments are addressed promptly and politely. The contributor is becoming the most responsive participant in a project whose maintainer is stretched thin.",
+      "source_url": "https://github.com/tukaani-project/xz/commits/master"
+    },
+    {
+      "actor_id": "jigar-kumar",
+      "kind": "email",
+      "occurred_at": "2022-05-19T00:00:00Z",
+      "content": "Escalates pressure on the mailing list: 'Patches spend years on this mailing list. 5.2.0 was released in 2015. There is no reason to think anything is coming soon.' The complaint is about the maintainer's throughput, from an account that has contributed no patches itself.",
+      "source_url": "https://www.mail-archive.com/xz-devel@tukaani.org/msg00566.html"
+    },
+    {
+      "actor_id": "jigar-kumar",
+      "kind": "email",
+      "occurred_at": "2022-06-07T00:00:00Z",
+      "content": "Directly demands a maintainer handover: 'Progress will not happen until there is new maintainer. ... Why wait until 5.4.0 to change maintainer? Why delay what your repo needs?' Still zero code contributions from this account.",
+      "source_url": "https://www.mail-archive.com/xz-devel@tukaani.org/msg00568.html"
+    },
+    {
+      "actor_id": "lasse-collin",
+      "kind": "email",
+      "occurred_at": "2022-06-08T00:00:00Z",
+      "content": "The maintainer replies under pressure, disclosing personal difficulty and naming a successor: 'I haven't lost interest but my ability to care has been fairly limited mostly due to longterm mental health issues but also due to some other things. ... Jia Tan has helped me off-list with xz and he might have a bigger role in the future at least with xz Utils.' A tired, under-resourced maintainer publicly signals a trust transfer.",
+      "source_url": "https://www.mail-archive.com/xz-devel@tukaani.org/msg00567.html"
+    },
+    {
+      "actor_id": "dennis-ens",
+      "kind": "email",
+      "occurred_at": "2022-06-14T00:00:00Z",
+      "content": "A second account with no prior project history joins the pressure campaign on the same theme — unresponsive maintainer, need for fresh ownership. Two independent-looking voices now push the same handover, within weeks of each other.",
+      "source_url": "https://www.mail-archive.com/xz-devel@tukaani.org/msg00570.html"
+    },
+    {
+      "actor_id": "jigar-kumar",
+      "kind": "email",
+      "occurred_at": "2022-06-21T00:00:00Z",
+      "content": "Final recorded message from this account, still on the maintainership theme. After the handover trajectory is established, the account goes permanently silent and is never seen in any project again.",
+      "source_url": "https://www.mail-archive.com/xz-devel@tukaani.org/msg00571.html"
+    },
+    {
+      "actor_id": "jia-tan",
+      "kind": "commit",
+      "occurred_at": "2022-09-27T00:00:00Z",
+      "approximate": true,
+      "content": "Sustained, high-quality contribution continues through the autumn: bug fixes, test additions, documentation. The contributor is now doing a large share of the visible work on the project.",
+      "source_url": "https://github.com/tukaani-project/xz/commits/master"
+    },
+    {
+      "actor_id": "jia-tan",
+      "kind": "maintainer_change",
+      "occurred_at": "2022-11-30T00:00:00Z",
+      "approximate": true,
+      "content": "Gains direct commit access to the xz-utils repository. The first commits authored and merged directly by this account land shortly after, without external review. Trust escalation from first-ever public activity to write access on a package installed on nearly every Linux system: roughly 13 months.",
+      "source_url": "https://github.com/tukaani-project/xz/commits/master"
+    },
+    {
+      "actor_id": "jia-tan",
+      "kind": "commit",
+      "occurred_at": "2023-01-11T00:00:00Z",
+      "content": "First self-merged commits land on master. Content is benign. The significant fact is structural, not textual: the review gate for this actor is now effectively gone.",
+      "source_url": "https://github.com/tukaani-project/xz/commits/master"
+    },
+    {
+      "actor_id": "jia-tan",
+      "kind": "maintainer_change",
+      "occurred_at": "2023-03-20T00:00:00Z",
+      "content": "Changes the primary contact address registered with Google's oss-fuzz for the xz project to the JiaT75-controlled address, redirecting automated security-report traffic away from the original maintainer.",
+      "source_url": "https://github.com/google/oss-fuzz/pull/10667"
+    },
+    {
+      "actor_id": "jia-tan",
+      "kind": "release",
+      "occurred_at": "2023-05-04T00:00:00Z",
+      "approximate": true,
+      "content": "Signs and publishes an xz-utils release as the acting release manager. Release engineering — the tarball-production step that will later carry the backdoor — is now under this actor's control.",
+      "source_url": "https://github.com/tukaani-project/xz/releases"
+    },
+    {
+      "actor_id": "hans-jansen",
+      "kind": "commit",
+      "occurred_at": "2023-06-27T00:00:00Z",
+      "content": "An account with no meaningful prior history contributes IFUNC (indirect function) resolver machinery to crc64_fast.c. The change is defensible on performance grounds and is merged. It is also precisely the mechanism the eventual backdoor uses to hook symbol resolution at runtime.",
+      "source_url": "https://github.com/tukaani-project/xz/commit/ee44863ae88e377a5df10db007ba9bfadde3d314"
+    },
+    {
+      "actor_id": "jia-tan",
+      "kind": "commit",
+      "occurred_at": "2023-07-08T00:00:00Z",
+      "content": "Opens a pull request against google/oss-fuzz to disable IFUNC-related detection for xz, justified as suppressing false positives. Effect: the fuzzing infrastructure most likely to notice anomalous IFUNC behaviour stops looking at it.",
+      "source_url": "https://github.com/google/oss-fuzz/pull/10667"
+    },
+    {
+      "actor_id": "jia-tan",
+      "kind": "commit",
+      "occurred_at": "2023-07-19T00:00:00Z",
+      "approximate": true,
+      "content": "Disables Landlock sandboxing support through a deliberately malformed configure check — a change that reads as a build-system quirk in isolation and removes a hardening layer in practice.",
+      "source_url": "https://github.com/tukaani-project/xz/commits/master"
+    },
+    {
+      "actor_id": "jia-tan",
+      "kind": "commit",
+      "occurred_at": "2023-11-28T00:00:00Z",
+      "approximate": true,
+      "content": "Ordinary maintenance continues over the autumn: version bumps, translation merges, CI adjustments. Nothing in this window would draw a reviewer's attention.",
+      "source_url": "https://github.com/tukaani-project/xz/commits/master"
+    },
+    {
+      "actor_id": "jia-tan",
+      "kind": "commit",
+      "occurred_at": "2024-02-23T00:00:00Z",
+      "content": "Commits 'Tests: Add a few test files.' adding binary blobs bad-3-corrupt_lzma2.xz and good-large_compressed.lzma. They are presented as corpus files for the test suite. They are in fact the encrypted payload stages of the backdoor. Binary test fixtures are conventionally not read by human reviewers.",
+      "source_url": "https://github.com/tukaani-project/xz/commit/cf44e4b7f5dfdbf8c78aef377c10f71e274f63c0"
+    },
+    {
+      "actor_id": "jia-tan",
+      "kind": "release",
+      "occurred_at": "2024-02-24T00:00:00Z",
+      "content": "Publishes the xz-utils 5.6.0 release tarball. The tarball's build-to-host.m4 differs from the repository: the shipped autotools file contains the loader stage that extracts the payload from the test fixtures during build and injects it into liblzma. The malicious code exists ONLY in the distributed tarball, never in the git history — so no amount of reviewing the repository can find it.",
+      "source_url": "https://www.openwall.com/lists/oss-security/2024/03/29/4"
+    },
+    {
+      "actor_id": "hans-jansen",
+      "kind": "email",
+      "occurred_at": "2024-03-01T00:00:00Z",
+      "approximate": true,
+      "content": "Files a Debian bug requesting that the distribution package the new 5.6.x release, urging speed. The same account that supplied the IFUNC groundwork is now pushing downstream adoption of the release that weaponises it.",
+      "source_url": "https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1067708"
+    },
+    {
+      "actor_id": "jia-tan",
+      "kind": "release",
+      "occurred_at": "2024-03-09T00:00:00Z",
+      "content": "Publishes 5.6.1, refining the backdoor after the 5.6.0 build proved unstable on some configurations. Distributions begin picking up the 5.6.x series.",
+      "source_url": "https://www.openwall.com/lists/oss-security/2024/03/29/4"
+    },
+    {
+      "actor_id": "jia-tan",
+      "kind": "email",
+      "occurred_at": "2024-03-25T00:00:00Z",
+      "approximate": true,
+      "content": "Continues to press distributions to adopt 5.6.x, supported by additional low-history accounts vouching for the release in downstream bug trackers.",
+      "source_url": "https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1067708"
+    },
+    {
+      "actor_id": "andres-freund",
+      "kind": "email",
+      "occurred_at": "2024-03-29T00:00:00Z",
+      "content": "Discloses the backdoor on oss-security after investigating roughly 500ms of unexplained latency in sshd logins and unusual CPU usage. Detection came 34 days after 5.6.0 shipped, by an unrelated engineer chasing a performance anomaly — not by any review process. Assigned CVE-2024-3094, CVSS 10.0.",
+      "source_url": "https://www.openwall.com/lists/oss-security/2024/03/29/4"
+    }
+  ]
+}
