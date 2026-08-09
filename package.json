@@ -9,9 +9,14 @@
   },
   "scripts": {
     "schema": "tsx scripts/schema.ts",
-    "spike": "tsx scripts/spike.ts",
     "seed": "tsx scripts/seed.ts",
+    "calibrate": "tsx scripts/calibrate.ts",
+    "replay": "tsx scripts/replay.ts",
     "explain": "tsx scripts/explain.ts",
+    "bench": "tsx scripts/bench.ts",
+    "spike": "tsx scripts/spike.ts",
+    "start": "tsx src/server.ts",
+    "dev": "tsx watch src/server.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

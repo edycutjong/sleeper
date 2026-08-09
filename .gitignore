@@ -1,5 +1,9 @@
 .env
 .env.*
+
+# Fitted at setup time by `npm run calibrate` against whichever embedding model is configured.
+# Never committed: a thresholds file from someone else's model would silently change the gate.
+data/thresholds.json
 node_modules/
 __pycache__/
 .next/
