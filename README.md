@@ -108,8 +108,8 @@ would quietly turn the benchmark into a measurement of the rules rather than of 
 | Tool | How it is used |
 |---|---|
 | **Distributed Vector Indexing** | Three inline `VECTOR INDEX` declarations (`sql/schema.sql`). `events` and `actor_arcs` are indexed on `(package_id, embedding vector_cosine_ops)` so ANN search is *prefix-scoped* to one package's own history; `takeover_playbook` is indexed unscoped, because a takeover shape learned anywhere must be matchable from anywhere. Retrieval uses `<=>` cosine ordering, and `EXPLAIN` is run on the live query to prove the `prefix spans` pre-filter — asserted in the test suite, not just claimed. |
-| **Managed MCP Server** | The "explain your hold" audit surface. `select_query` fetches the rows behind a decision, `explain_query` re-runs the scoped search on demand, `get_table_schema` answers "what does Sleeper actually track?". `npm run explain` performs the same reads locally for anyone who does not want to wire up MCP. |
-| **ccloud CLI** | Provisions the Basic cluster and creates two service identities with different privilege scopes — `ingest_svc` (write path) and `gate_svc` (decision path). Access control is a demonstrated feature, not a footnote. |
+| **ccloud CLI** | Provisions the Basic cluster and creates two service identities with different privilege scopes — `ingest_svc` (write path) and `gate_svc` (decision path). Access control is a demonstrated feature, not a footnote. See [DEMO.md §1](DEMO.md#provision-the-cluster-cockroachdb-ccloud-cli). |
+| **Managed MCP Server** | ⚠️ **Not wired yet.** The "explain your hold" audit path exists today as direct SQL in `src/memory.ts` (`holdEvidence`) and `npm run explain`, which perform exactly the reads MCP's `select_query` / `explain_query` / `get_table_schema` would serve. Routing them through the Managed MCP Server is the next integration step; this row will describe working code or be removed before submission. |
 
 The single ACID transaction is the reason this is CockroachDB and not a vector database bolted
 onto a relational one: the vector search that produces the decision and the state change that acts
@@ -179,6 +179,11 @@ every figure. It refuses to run in offline mode. Results land in [DEMO.md](DEMO.
 One package, one flow, done deeply. No multi-package dashboard, no user accounts, no Bedrock
 Agents orchestration layer, no multi-region configuration, no second demo scenario. S3-backed
 tarball diffing is described in the architecture but is not wired in this build.
+
+Still to land before this is submission-complete: the Managed MCP Server integration (see the
+table above) and a deployed Lambda — `src/handler.ts` is written and typechecked but has not been
+deployed. Nothing in this README claims a capability the code does not have; where something is
+pending it says so.
 
 ## 📄 License
 
