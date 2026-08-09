@@ -39,6 +39,14 @@ export function toVector(embedding: number[]): string {
   return `[${embedding.join(',')}]`
 }
 
+/** Inverse of `toVector` — CockroachDB returns VECTOR columns as the same text literal. */
+export function fromVector(literal: string): number[] {
+  return literal
+    .replace(/^\[|\]$/g, '')
+    .split(',')
+    .map(Number)
+}
+
 export async function query<T extends pg.QueryResultRow = pg.QueryResultRow>(
   text: string,
   params: unknown[] = [],

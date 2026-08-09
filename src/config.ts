@@ -20,4 +20,8 @@ export const config = {
   packageId: process.env.PACKAGE_ID ?? 'xz-utils',
   /** Rolling behavioural window, in days, that an actor arc summarises. */
   arcWindowDays: Number(process.env.ARC_WINDOW_DAYS ?? 90),
+  /** The account whose arc the xz replay assesses at the 5.6.0 release. */
+  suspectActor: process.env.SUSPECT_ACTOR ?? 'jia-tan',
+  /** Demo server port. */
+  port: Number(process.env.PORT ?? 3000),
 } as const
