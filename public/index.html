@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sleeper — the release gate that remembers</title>
+    <meta
+      name="description"
+      content="A release-gate agent whose multi-year memory in CockroachDB recognises a slow-motion supply-chain takeover and atomically holds the poisoned release."
+    />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="mark" aria-hidden="true"></span>
+        <div>
+          <h1>Sleeper</h1>
+          <p>The release gate that remembers.</p>
+        </div>
+      </div>
+      <dl class="stats" id="stats">
+        <div><dt>events in memory</dt><dd id="stat-events">–</dd></div>
+        <div><dt>playbook arcs</dt><dd id="stat-playbook">–</dd></div>
+        <div><dt>held-out</dt><dd id="stat-heldout">–</dd></div>
+        <div><dt>trust state</dt><dd id="stat-trust">–</dd></div>
+      </dl>
+    </header>
+
+    <main>
+      <section class="intro">
+        <p>
+          On 2024-03-29 a backdoor was found in <strong>xz-utils</strong> (CVE-2024-3094), planted
+          over roughly two years by a contributor who built trust one innocuous commit at a time.
+          No single commit was suspicious. It was caught five weeks after the poisoned release
+          shipped, because one engineer investigated 500&nbsp;ms of unexplained SSH login latency.
+        </p>
+        <p>
+          Press replay. The real public timeline streams into CockroachDB event by event, the agent
+          rolls it into a behavioural arc, searches its own memory, and decides whether to let the
+          release out.
+        </p>
+        <div class="actions">
+          <button id="replay" type="button">Replay the xz timeline</button>
+          <span class="provider" id="provider"></span>
+        </div>
+        <p class="warn" id="offline-warning" hidden>
+          Running with the offline stand-in for AWS Bedrock — wiring only. Similarity numbers on
+          this page are from a hash function, not a model.
+        </p>
+      </section>
+
+      <div class="grid">
+        <section class="panel stream">
+          <h2>Event stream <span class="sub" id="stream-count"></span></h2>
+          <ol id="events" class="events"></ol>
+        </section>
+
+        <div class="column">
+          <section class="panel" id="arc-panel" hidden>
+            <h2>Actor arc <span class="sub" id="arc-window"></span></h2>
+            <p class="summary" id="arc-summary"></p>
+            <ul class="evidence" id="arc-evidence"></ul>
+          </section>
+
+          <section class="panel" id="explain-panel" hidden>
+            <h2>
+              Prefix-scoped vector search
+              <span class="badge" id="explain-badge"></span>
+            </h2>
+            <p class="note">
+              The <code>prefix spans</code> line is the proof the ANN scan was bounded to this
+              package's own history by the leading index column — not a global scan.
+            </p>
+            <pre id="explain-plan"></pre>
+          </section>
+
+          <section class="panel" id="match-panel" hidden>
+            <h2>Playbook match <span class="sub">unscoped, held-out arcs excluded</span></h2>
+            <table class="matches">
+              <thead>
+                <tr><th>arc</th><th>label</th><th>cosine similarity</th></tr>
+              </thead>
+              <tbody id="matches"></tbody>
+            </table>
+          </section>
+
+          <section class="panel" id="decision-panel" hidden>
+            <h2>Decision <span class="badge" id="decision-badge"></span></h2>
+            <p id="decision-explanation"></p>
+          </section>
+
+          <section class="panel hold" id="hold-panel" hidden>
+            <h2>Release held</h2>
+            <p class="hold-line">
+              <code id="hold-id"></code> committed in <strong>one transaction</strong>
+              <span id="hold-latency"></span>
+            </p>
+            <ul class="writes" id="hold-writes"></ul>
+            <h3>Rationale</h3>
+            <p id="hold-reason"></p>
+            <h3>Distro advisory</h3>
+            <p id="hold-advisory"></p>
+          </section>
+
+          <section class="panel verdict" id="verdict-panel" hidden>
+            <p id="verdict"></p>
+          </section>
+        </div>
+      </div>
+    </main>
+
+    <footer>
+      <p>
+        The xz replay is a ground-truth demo of a real public incident, not a benchmark. Accuracy
+        numbers are measured separately, on held-out synthetic arcs, by <code>npm run bench</code>
+        — see <code>DEMO.md</code>.
+      </p>
+    </footer>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
