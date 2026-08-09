@@ -14,7 +14,6 @@
     "replay": "tsx scripts/replay.ts",
     "explain": "tsx scripts/explain.ts",
     "bench": "tsx scripts/bench.ts",
-    "spike": "tsx scripts/spike.ts",
     "start": "tsx src/server.ts",
     "dev": "tsx watch src/server.ts",
     "test": "vitest run",
