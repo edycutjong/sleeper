@@ -1242,7 +1242,7 @@ npm run schema && npm run seed && npm run calibrate && npm run replay">copy</but
         <div class="ledger-card reveal">
           <h3>Why no number appears on this page</h3>
           <ul>
-            <li><strong>The benchmark has not been run, so this page cites no accuracy or latency figure.</strong> The <code>BENCH</code> block in <code>DEMO.md</code> is still empty; the measured table lands there when it runs against a live cluster.</li>
+            <li><strong>No accuracy figure exists, and this page cites none.</strong> Recall, hold recall and false-positive rate need real embeddings, and <code>npm run bench</code> refuses to compute them against the offline stand-in — a quality number derived from a hash function would be a property of the hash. Latency is a different question: it is a property of the vector index and the row count, not of the model, so <code>DEMO.md</code> now carries a p50/p95 measured on a local single-node cluster over a corpus of 8 searchable arcs, labelled as the floor it is rather than a scale result.</li>
             <li><code>npm run bench</code> measures recall@k, hold recall, false-positive rate, precision and p50/p95 decision latency — <strong>only on held-out arcs</strong> the agent can never retrieve, against a lexical baseline, with the xz timeline excluded from every figure.</li>
             <li>The xz replay is <strong>ground truth on a real incident</strong>: evidence the mechanic recognises the actual takeover. It is not a measurement and it feeds no metric.</li>
             <li>Thresholds are fitted by leave-one-out on the playbook split only, never on the evaluation set, and the fitted file is gitignored.</li>

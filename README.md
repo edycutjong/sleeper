@@ -10,6 +10,9 @@ A release-gate agent whose multi-year memory of every commit, email and maintain
 recognises a slow-motion supply-chain takeover — the xz backdoor pattern — that no single code
 review can see, and atomically **holds** the poisoned release before it ships.
 
+**A 90-day slice of the xz attack is three innocuous commits. The signal only exists across years —
+so the memory layer *is* the product.**
+
 <img src="docs/assets/readme-hero.png" alt="Sleeper" width="820" />
 
 <br />
@@ -62,6 +65,29 @@ backdoor was disclosed on 2024-03-29. Both dates are in `data/xz-timeline.json`,
 > separately, on held-out synthetic arcs, by `npm run bench`. The two are reported apart on
 > purpose — see [DEMO.md](DEMO.md).
 
+## ⏱️ Why an agent, not a cron job and a rule
+
+**A stateless handler decides on its input. This decision has no input.** The events the 5.6.0
+assessment reads span **984 days** — 2021-06-15 to 2024-02-24 (`data/xz-timeline.json`). No webhook
+payload carries that, and there is nothing to hand a rule. The thing being classified has to be
+*constructed* at decision time: `actorHistory` and `packageHistory` (`src/memory.ts`) read the trail
+back out of the cluster, bounded by the assessment timestamp, and `buildArc` (`src/agent.ts`) rolls
+it into one behavioural arc that is then embedded and searched against. The object of the decision
+does not exist until the agent builds it.
+
+**A rule set is written after the attack it catches.** This repo *contains* those rules — tenure,
+privilege-escalation speed, build-system concentration, no-code pressure accounts, all of them in
+`src/signals.ts` — and bars every one of them from voting. Adding a new takeover shape is a row in
+`takeover_playbook`, not a code change: `npm run seed` inserts arcs from `data/synthetic-arcs.json`,
+and the gate matches against whatever is in the table.
+
+**An app answers; an agent acts.** The retrieval result is never rendered to a human as an answer.
+It commits four writes in one transaction — `release_hold`, `trust_state → 'held'`,
+`distro_advisory_outbox`, `audit_log` (`commitHold`, `src/memory.ts`) — and the release is blocked.
+And because it acts rather than answers, it has to be able to decline: with no benign neighbour
+retrieved there is nothing to contrast against, so `decide()` (`src/decide.ts`) treats the margin as
+zero and refuses to hold rather than acting on a similarity score alone.
+
 ## 🧠 How it works
 
 The premise is that **the memory layer is the product**. A 90-day slice of this attack is three
@@ -87,7 +113,7 @@ flowchart TD
     N --> O["Distro packager:<br/>'explain your hold'"]
 ```
 
-Three details that matter:
+Four details that matter:
 
 **The agent never reads the seed file at decision time.** Events are ingested into CockroachDB,
 and the arc is rebuilt by reading that history *back out of the cluster*, filtered to what was
@@ -103,6 +129,47 @@ superficially resemble takeovers (fast rise, handover, brand-new account) so tha
 concentration and no-code pressure accounts are computed from memory and cited in the hold
 rationale — but they do not participate in the decision. Mixing a hand-tuned rule engine into it
 would quietly turn the benchmark into a measurement of the rules rather than of the memory.
+
+**What is stored is behaviour, never a verdict.** The arc summariser is told to describe the *shape*
+of a trajectory — how the actor entered, how fast trust escalated, what kinds of change they
+concentrated on, what other accounts did around them — and is explicitly forbidden from saying
+whether this is an attack, and from naming the package or any real person (`ARC_SYSTEM`,
+`src/agent.ts`). That constraint is load-bearing, not stylistic. If the summariser were allowed to
+write the conclusion, the vector it produces would encode the model's opinion, retrieval would be
+decoration on a judgement already made, and the playbook would be scoring how confidently Claude
+called something an attack instead of how closely the actor's behaviour matches a known shape. The
+anonymity half is the same argument: an arc that names the package or the person lets identity leak
+into a vector space that is supposed to hold nothing but shape.
+
+## ⚖️ Two choices that look wrong on paper
+
+Both are described above as mechanism. Here is the alternative each one rejected, and the price it
+pays for it.
+
+**A two-sided gate instead of a similarity threshold.**
+
+- *Rejected:* a single "similarity to a known takeover ≥ X" cut. It holds every fast-rising new
+  maintainer — which describes most of the good ones.
+- *Cost accepted:* an attacker who mimics an ordinary contributor closely enough sits inside the
+  margin and passes. `npm run bench` measures that on held-out arcs rather than hiding it, and
+  several benign playbook arcs are written to resemble takeovers on the surface (fast rise,
+  handover, brand-new account — `data/synthetic-arcs.json`) so the margin is not free to earn.
+- *Not a novelty claim:* it is a margin rule with two hyperparameters (`holdAt`, `minMargin`) fitted
+  by leave-one-out over 8 playbook arcs (`scripts/calibrate.ts`). It is not a new algorithm. The
+  defensible claim is narrower: for a gate that blocks releases this is the correct product
+  decision, it has an abstain path, and its cost is written down rather than discovered later.
+
+**Rules computed, then barred from voting.**
+
+- *Rejected:* letting tenure, escalation speed, build-system share and pressure accounts contribute
+  to the score — the obvious move, since those are the tells everyone cites about xz.
+- *Why not:* a rule set is a snapshot of last year's attack. It catches the shape someone already
+  wrote down, and the next takeover that rhymes without matching needs a code change to catch. A
+  retrieval library grows by adding a row to `takeover_playbook` and editing nothing. Benchmark
+  hygiene is the second reason: a hand-tuned rule engine inside the decision path turns the
+  benchmark into a measurement of the rules rather than of the memory.
+- *Cost accepted:* structural tells alone will never hold a release. If the arc lands far from every
+  shape in the playbook, `decide()` allows it no matter what `src/signals.ts` computed.
 
 ## 🪐 CockroachDB tools used
 
@@ -168,9 +235,20 @@ accuracy figures, which need real embeddings.
 
 ## 📊 Benchmark
 
-`npm run bench` reports recall@k, hold recall, false-positive rate and p50/p95 decision latency —
-measured **only** on held-out arcs, against a lexical baseline, with the xz timeline excluded from
-every figure. It refuses to run in offline mode. Results land in [DEMO.md](DEMO.md#results).
+`npm run bench` reports recall@k, hold recall, false-positive rate and p50/p95 latency — measured
+**only** on held-out arcs, against a lexical baseline, with the xz timeline excluded from every
+figure. It refuses to run in offline mode, because a quality number computed on a hash function
+would be a property of the hash function. **No accuracy figure has been produced yet**; that needs
+Bedrock.
+
+Latency is separable, and is measured. `npm run bench -- --latency-only` runs offline by design: the
+timed window is a CockroachDB ANN round trip plus arithmetic, and its cost is a property of the
+vector index, the row count and the 1024-dimension width — a stand-in vector descends exactly the
+same index as a Titan one. The mode reads its probe vectors with a query that selects no `label`
+column, so the ground truth is not even in the process and no accuracy figure can be derived from
+it. The measured p50/p95, the corpus size it was measured over, and a real `EXPLAIN` plan showing
+the deciding query's `prefix spans` are in [DEMO.md](DEMO.md#results) — with the caveat that 8
+searchable arcs is a floor, not a scale result.
 
 ## 🛡️ Production readiness
 
@@ -213,6 +291,51 @@ every figure. It refuses to run in offline mode. Results land in [DEMO.md](DEMO.
   set, and the fitted file is gitignored so a threshold from someone else's model cannot silently
   move the gate.
 
+## ⚠️ If Sleeper is wrong
+
+A false positive here is not a spam-folder mistake. It delays a *security* release — the class of
+release that is most expensive to delay — and it queues an advisory to Debian, Fedora and Arch
+describing the behaviour of a named contributor. Sleeper decides on behaviour, not on proof of
+compromise, so it will eventually be wrong about someone. What exists in code against that:
+
+- **The margin gate, and an abstain path.** `decide()` requires separation from the nearest
+  ordinary-contributor arc, and refuses to hold at all when no benign neighbour was retrieved to
+  contrast against (`src/decide.ts`).
+- **The rationale may not assert intent.** `RATIONALE_SYSTEM` (`src/agent.ts`) instructs Claude to
+  state what the memory layer observed and never to assert intent or accuse a named person; the
+  advisory must say the hold is behavioural rather than a confirmed vulnerability.
+- **Specificity is not free.** Several benign arcs in the playbook are written adversarially, so an
+  arc has to be closer to a takeover shape than to a plausible innocent one that shares its
+  surface features.
+- **The hold is advisory.** It writes rows: a `release_hold`, a trust status, and an advisory
+  *queued* in `distro_advisory_outbox` with `sent = false`. Nothing in `src/` sends it and nothing
+  pulls an artifact from anywhere — a packager reads the hold and its evidence through the MCP audit
+  surface and decides.
+- **A reversal is recorded, not erased.** `commitUnhold` (`src/memory.ts`) updates the hold in place
+  with who cleared it, when and why, queues a *retraction* advisory, and appends a second audit row,
+  all in one transaction. It never DELETEs, because "we held your release and then erased the
+  evidence that we did" is a worse story than the false positive it covers up.
+
+`npm run bench` reports a false-positive rate on held-out arcs. It has not been run against real
+embeddings, so no value for it is claimed anywhere in this repo — see
+[Not built](#-not-built-deliberately).
+
+## 🔭 What this is not
+
+- **Not UEBA or insider-threat analytics.** Those score deviation from an entity's *own* learned
+  baseline. Sleeper computes no per-actor baseline anywhere — `decide()` (`src/decide.ts`) receives
+  playbook matches and nothing else. It matches an arc against a labelled library of adversary
+  trajectory shapes and requires separation from the nearest ordinary shape. Case-based reasoning,
+  not anomaly detection.
+- **Not Socket.dev or OpenSSF Scorecard-style structural scoring.** Those heuristics exist here
+  (`src/signals.ts`) and are explicitly barred from deciding. The refusal is the move, not the
+  heuristics.
+- **Not RAG over logs.** Nothing is answered to a human. Retrieval is the actuator: its output goes
+  straight into the four-write transaction that blocks the release (`commitHold`, `src/memory.ts`).
+- **Not MITRE ATT&CK-style playbook matching.** The match is fuzzy — cosine similarity over
+  LLM-written trajectory summaries rather than rule or indicator matching — and it requires a benign
+  contrast that the rule-based version has no notion of.
+
 ## 🚧 Not built (deliberately)
 
 One package, one flow, done deeply. No multi-package dashboard, no user accounts, no Bedrock
@@ -228,9 +351,9 @@ Known gaps, stated rather than buried:
   recorded payload fixtures and the permission-denied and `isError` paths.
 - **No accuracy figures exist.** `npm run bench` refuses to run offline, and it refuses thresholds
   fitted by the offline stand-in — both deliberately. Recall and false-positive rate require real
-  embeddings, so they are absent rather than approximated. Latency is a different question: it is a
-  property of the vector index and the row count, not of the model, so it can be measured on a
-  local node and labelled as such.
+  embeddings, so they are absent rather than approximated. Latency *has* been measured, offline and
+  labelled as such (see Benchmark above); it is a property of the index, not of the model. The
+  corpus it was measured over is 8 searchable arcs, which is a floor and is stated as one.
 - **The replay still takes a configured suspect actor.** The webhook path derives the actor from the
   event, but `npm run replay` is pointed at one. Deriving candidates from memory alone is the honest
   next step; today the demo is told where to look, and a real deployment would not be.
