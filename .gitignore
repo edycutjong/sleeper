@@ -1,5 +1,7 @@
 .env
 .env.*
+# ... except the template, which is the example config the setup instructions tell you to copy.
+!.env.example
 
 # Fitted at setup time by `npm run calibrate` against whichever embedding model is configured.
 # Never committed: a thresholds file from someone else's model would silently change the gate.

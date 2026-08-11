@@ -10,7 +10,8 @@
  * site (see src/db.ts).
  */
 import type { PoolClient } from 'pg'
-import { fromVector, query, toVector, withTransaction } from './db.js'
+import { directSqlReader, fromVector, query, toVector, withTransaction } from './db.js'
+import { assertUuid, resolveSqlReader, sqlLiteral, vectorLiteral, type SqlReader } from './mcp.js'
 import type { Label, PlaybookMatch } from './decide.js'
 
 const DAY_MS = 86_400_000
@@ -232,6 +233,53 @@ export async function explainScoped(
 }
 
 /**
+ * The same prefix-scoped query as `SCOPED_NEIGHBOUR_SQL`, as one self-contained statement.
+ *
+ * MCP tool calls carry finished SQL text — there is no bind-parameter channel — so the plan the
+ * Managed MCP Server is asked for has to be literal. Two differences from the parameterised form,
+ * both forced and both harmless to the plan:
+ *
+ *  - the `embedding <=> $2` **projection** is dropped, because printing a 1024-dimension vector
+ *    twice in one statement blows past the server's 16,384-char limit on its own. What proves
+ *    prefix scoping is the `ORDER BY … <=> …` + `WHERE package_id = …` pair, which is intact.
+ *  - the vector is rounded (see `vectorLiteral`), because full float precision is ~20 KB of text.
+ *    EXPLAIN plans the query; it does not evaluate the distances.
+ */
+export function scopedNeighbourExplainSql(
+  packageId: string,
+  embedding: number[],
+  limit = 20,
+  decimals = 6,
+): string {
+  return `SELECT id, actor_id, kind, content, occurred_at, source_url
+FROM events
+WHERE package_id = ${sqlLiteral(packageId)}
+ORDER BY embedding <=> ${sqlLiteral(vectorLiteral(embedding, decimals))}::VECTOR
+LIMIT ${Math.trunc(limit)}`
+}
+
+/**
+ * `EXPLAIN` the prefix-scoped retrieval through whichever audit path is in force.
+ *
+ * Over MCP this is the server's own `explain_query` tool: the `prefix spans` line then arrives
+ * from the cluster through a read-only, audit-logged channel that the agent does not control,
+ * which is what makes it evidence to a third party rather than a claim by us.
+ */
+export async function explainScopedVia(
+  reader: SqlReader,
+  packageId: string,
+  embedding: number[],
+  limit = 20,
+): Promise<ExplainResult> {
+  const plan = await reader.explain(scopedNeighbourExplainSql(packageId, embedding, limit))
+  return {
+    plan,
+    prefixScoped: hasPrefixSpans(plan),
+    usedVectorIndex: /vector search/i.test(plan),
+  }
+}
+
+/**
  * Unscoped search against the playbook: a takeover shape learned anywhere must be matchable
  * from any package, so this one deliberately does NOT filter by package_id.
  *
@@ -434,77 +482,113 @@ export type HoldEvidence = {
 }
 
 /**
- * The "explain your hold" read path — the same rows the Managed MCP Server surfaces when a
- * downstream distro packager asks why their release stopped.
+ * The audit path, resolved once per entry point: Managed MCP Server if it is configured and
+ * reachable, direct SQL otherwise — never silently, always with a printable reason.
  */
-export async function holdEvidence(holdId: string): Promise<HoldEvidence | null> {
-  const hold = await query<{
-    id: string
-    package_id: string
-    release_version: string
-    reason: string
-    similarity: string
-    created_at: Date
-    matched_playbook_id: string | null
-  }>(
-    `SELECT id, package_id, release_version, reason, similarity, created_at, matched_playbook_id
-     FROM release_hold WHERE id = $1`,
-    [holdId],
-  )
-  if (!hold.rows.length) return null
-  const row = hold.rows[0]!
+export async function auditReader(env: NodeJS.ProcessEnv = process.env): Promise<SqlReader> {
+  return resolveSqlReader(directSqlReader, env)
+}
 
-  const matched = row.matched_playbook_id
-    ? await query<{ package_id: string; label: string; source: string; arc_summary: string }>(
-        `SELECT package_id, label, source, arc_summary FROM takeover_playbook WHERE id = $1`,
-        [row.matched_playbook_id],
-      )
-    : null
+/**
+ * The five statements behind "explain your hold", as finished SQL.
+ *
+ * They are literal rather than parameterised because the Managed MCP Server's `select_query`
+ * tool takes SQL text and has no bind channel — so ids are validated (`assertUuid`) or quoted
+ * (`sqlLiteral`) here rather than concatenated at a call site. Two more properties are deliberate:
+ *
+ *  - **every SELECT carries an explicit LIMIT.** An unbounded `select_query` is capped at 25 rows
+ *    by the server; a silently truncated audit trail that still looks complete is exactly the
+ *    failure a distro packager cannot afford.
+ *  - **timestamps are cast to STRING.** The MCP path returns JSON and the pg path returns `Date`;
+ *    casting in SQL makes both paths agree on the wire so one parser serves both.
+ *
+ * Exported so the test suite can assert their shape and their size without a cluster.
+ */
+export const EVIDENCE_SQL = {
+  hold: (holdId: string): string =>
+    `SELECT id, package_id, release_version, reason, similarity,
+        created_at::STRING AS created_at, matched_playbook_id
+ FROM release_hold WHERE id = ${sqlLiteral(assertUuid(holdId))} LIMIT 1`,
 
-  const trust = await query<{ status: string }>(
-    'SELECT status FROM trust_state WHERE package_id = $1',
-    [row.package_id],
-  )
+  matchedArc: (playbookId: string): string =>
+    `SELECT package_id, label, source, arc_summary
+ FROM takeover_playbook WHERE id = ${sqlLiteral(assertUuid(playbookId))} LIMIT 1`,
 
-  const advisories = await query<{ id: string; advisory_text: string; sent: boolean }>(
-    'SELECT id, advisory_text, sent FROM distro_advisory_outbox WHERE release_hold_id = $1',
-    [holdId],
-  )
+  trust: (packageId: string): string =>
+    `SELECT status FROM trust_state WHERE package_id = ${sqlLiteral(packageId)} LIMIT 1`,
 
-  const audit = await query<{ actor: string; action: string; detail: string | null; created_at: Date }>(
-    `SELECT actor, action, detail, created_at FROM audit_log
-     WHERE release_hold_id = $1 ORDER BY created_at ASC`,
-    [holdId],
-  )
+  advisories: (holdId: string): string =>
+    `SELECT id, advisory_text, sent FROM distro_advisory_outbox
+ WHERE release_hold_id = ${sqlLiteral(assertUuid(holdId))} ORDER BY created_at ASC LIMIT 1000`,
+
+  auditTrail: (holdId: string): string =>
+    `SELECT actor, action, detail, created_at::STRING AS created_at FROM audit_log
+ WHERE release_hold_id = ${sqlLiteral(assertUuid(holdId))} ORDER BY created_at ASC LIMIT 1000`,
+} as const
+
+const str = (v: unknown): string => (v == null ? '' : String(v))
+const nullableStr = (v: unknown): string | null => (v == null ? null : String(v))
+const bool = (v: unknown): boolean => v === true || v === 'true' || v === 't' || v === 1
+const date = (v: unknown): Date => (v instanceof Date ? v : new Date(String(v)))
+
+/**
+ * The "explain your hold" read path — five read-only statements, run through the Managed MCP
+ * Server when it is configured and through the pg pool when it is not.
+ *
+ * This is the path a downstream distro packager takes when their release stops: they are not the
+ * agent, they should not hold the agent's write credentials, and MCP is read-only at the protocol
+ * layer even where the SQL identity underneath could write. Routing the audit through it — while
+ * the HOLD itself stays on a direct-SQL transaction, because one statement per call cannot express
+ * a four-write COMMIT — is the split the two systems are actually shaped for.
+ *
+ * Pass a reader from `auditReader()` to choose the path; the default is direct SQL, so every
+ * existing caller behaves exactly as before.
+ */
+export async function holdEvidence(
+  holdId: string,
+  reader: SqlReader = directSqlReader('default reader — caller did not resolve an audit path'),
+): Promise<HoldEvidence | null> {
+  const holdRows = await reader.select<Record<string, unknown>>(EVIDENCE_SQL.hold(holdId))
+  const row = holdRows[0]
+  if (!row) return null
+
+  const matchedPlaybookId = nullableStr(row.matched_playbook_id)
+  const matched = matchedPlaybookId
+    ? (await reader.select<Record<string, unknown>>(EVIDENCE_SQL.matchedArc(matchedPlaybookId)))[0]
+    : undefined
+
+  const trust = (await reader.select<Record<string, unknown>>(EVIDENCE_SQL.trust(str(row.package_id))))[0]
+  const advisories = await reader.select<Record<string, unknown>>(EVIDENCE_SQL.advisories(holdId))
+  const audit = await reader.select<Record<string, unknown>>(EVIDENCE_SQL.auditTrail(holdId))
 
   return {
     hold: {
-      id: row.id,
-      packageId: row.package_id,
-      releaseVersion: row.release_version,
-      reason: row.reason,
+      id: str(row.id),
+      packageId: str(row.package_id),
+      releaseVersion: str(row.release_version),
+      reason: str(row.reason),
       similarity: Number(row.similarity),
-      createdAt: row.created_at,
+      createdAt: date(row.created_at),
     },
-    matchedArc: matched?.rows[0]
+    matchedArc: matched
       ? {
-          packageId: matched.rows[0].package_id,
-          label: matched.rows[0].label,
-          source: matched.rows[0].source,
-          arcSummary: matched.rows[0].arc_summary,
+          packageId: str(matched.package_id),
+          label: str(matched.label),
+          source: str(matched.source),
+          arcSummary: str(matched.arc_summary),
         }
       : null,
-    trustStatus: trust.rows[0]?.status ?? null,
-    advisories: advisories.rows.map((r) => ({
-      id: r.id,
-      advisoryText: r.advisory_text,
-      sent: r.sent,
+    trustStatus: trust ? str(trust.status) : null,
+    advisories: advisories.map((a) => ({
+      id: str(a.id),
+      advisoryText: str(a.advisory_text),
+      sent: bool(a.sent),
     })),
-    auditTrail: audit.rows.map((r) => ({
-      actor: r.actor,
-      action: r.action,
-      detail: r.detail,
-      createdAt: r.created_at,
+    auditTrail: audit.map((a) => ({
+      actor: str(a.actor),
+      action: str(a.action),
+      detail: nullableStr(a.detail),
+      createdAt: date(a.created_at),
     })),
   }
 }

@@ -1,5 +1,6 @@
 import pg from 'pg'
 import { config } from './config.js'
+import type { SqlReader } from './mcp.js'
 
 const { Pool } = pg
 
@@ -52,6 +53,46 @@ export async function query<T extends pg.QueryResultRow = pg.QueryResultRow>(
   params: unknown[] = [],
 ): Promise<pg.QueryResult<T>> {
   return getPool().query<T>(text, params as never[])
+}
+
+/**
+ * The direct-SQL backing of the audit read surface (see `SqlReader` in src/mcp.ts).
+ *
+ * This is the fallback the audit path lands on when the Managed MCP Server is not configured or
+ * cannot be reached. It answers the identical statements the MCP tools are handed, so the two
+ * paths cannot drift: `select_query` → `query`, `explain_query` → `EXPLAIN <sql>`,
+ * `get_table_schema` → `SHOW CREATE TABLE`.
+ *
+ * `reason` is mandatory and printed by every caller, so choosing this path is always visible.
+ */
+export function directSqlReader(reason: string): SqlReader {
+  const calls: string[] = []
+  return {
+    via: 'direct',
+    reason,
+    calls,
+    async select<T = Record<string, unknown>>(sql: string): Promise<T[]> {
+      calls.push('SQL SELECT')
+      const result = await query(sql)
+      return result.rows as T[]
+    },
+    async explain(sql: string): Promise<string> {
+      calls.push('SQL EXPLAIN')
+      const result = await query<{ info: string }>(`EXPLAIN ${sql}`)
+      return result.rows.map((r) => r.info).join('\n')
+    },
+    async tableSchema(table: string): Promise<string> {
+      calls.push('SQL SHOW CREATE TABLE')
+      // Identifier, not a value — validated rather than quoted, because a table name cannot be
+      // bound as a parameter and must never be concatenated unchecked.
+      if (!/^[a-z_][a-z0-9_]*$/i.test(table)) throw new Error(`Not a plain table name: ${table}`)
+      const result = await query<{ create_statement: string }>(`SHOW CREATE TABLE ${table}`)
+      return result.rows.map((r) => r.create_statement).join('\n')
+    },
+    async close(): Promise<void> {
+      // The pool is shared with the write path and closed by the process, not by one reader.
+    },
+  }
 }
 
 /** Runs `fn` inside a single transaction — used for the atomic HOLD. */
