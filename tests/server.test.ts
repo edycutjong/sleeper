@@ -147,7 +147,13 @@ describe.skipIf(!LIVE)('demo server', () => {
   })
 
   describe('C9 — the browser demo exercises the resolved audit reader', () => {
-    it('names the path that served the explain read', async () => {
+    // 20s, not vitest's 5s default. When COCKROACH_MCP_API_KEY is set this route resolves the
+    // audit reader by actually dialling cockroachlabs.cloud — ~0.85s idle, but well past 5s when
+    // the suite is competing with itself for the same cluster. It failed intermittently in roughly
+    // one run of six and passed in 1.6s when run alone, which is the signature of a timeout that is
+    // too tight rather than a race. The real fix is to stop dialling a third party inside a request
+    // (the resolution should be cached); until then, the timeout should not be the thing that lies.
+    it('names the path that served the explain read', { timeout: 20_000 }, async () => {
       const res = await fetch(`${BASE}/api/explain`)
       // 404 before a replay has ever run, which is a legitimate state on a fresh cluster.
       if (res.status === 404) {

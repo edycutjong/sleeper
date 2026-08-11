@@ -52,6 +52,40 @@ describe('decide', () => {
     expect(d.margin).toBe(0)
   })
 
+  // The test above passes only because `T` hand-picks a positive `minMargin`. That is precisely
+  // how this bug survived: the abstain path was asserted against a fixture, never against what
+  // `fitThresholds` actually returns. The offline fit produced minMargin = -0.0198, and
+  // `0 >= -0.0198` is true — so in the shipped configuration the abstain did not fire and the gate
+  // held on similarity alone.
+  //
+  // This drives the abstain through the FITTED thresholds instead, on a corpus whose margins are
+  // noise around zero — exactly the shape that produced the negative fit.
+  it('still refuses to hold with nothing to contrast against, under FITTED thresholds', () => {
+    const noisy = [
+      { label: 'takeover' as const, similarity: 0.51, margin: 0.004 },
+      { label: 'takeover' as const, similarity: 0.49, margin: -0.011 },
+      { label: 'benign' as const, similarity: 0.5, margin: -0.002 },
+      { label: 'benign' as const, similarity: 0.48, margin: 0.006 },
+    ]
+    const fitted = fitThresholds(noisy)
+    expect(fitted.minMargin).toBeGreaterThanOrEqual(0)
+
+    const d = decide([match('takeover', 0.97)], fitted)
+    expect(d.hold).toBe(false)
+    expect(d.margin).toBe(0)
+  })
+
+  it('never fits a negative minMargin, because that inverts the gate', () => {
+    // A negative floor accepts an arc CLOSER to a benign contributor than to any takeover.
+    const inverted = [
+      { label: 'takeover' as const, similarity: 0.9, margin: -0.3 },
+      { label: 'takeover' as const, similarity: 0.88, margin: -0.25 },
+      { label: 'benign' as const, similarity: 0.4, margin: -0.9 },
+      { label: 'benign' as const, similarity: 0.35, margin: -0.8 },
+    ]
+    expect(fitThresholds(inverted).minMargin).toBeGreaterThanOrEqual(0)
+  })
+
   it('handles an empty result set without throwing', () => {
     const d = decide([], T)
     expect(d.hold).toBe(false)

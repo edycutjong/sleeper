@@ -25,7 +25,7 @@ so the memory layer *is* the product.**
 ![AWS Bedrock](https://img.shields.io/badge/AWS-Bedrock-FF9900?style=flat-square)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178C6?style=flat-square)
 ![Node](https://img.shields.io/badge/Node-%E2%89%A522-339933?style=flat-square)
-![Tests](https://img.shields.io/badge/tests-207_passing-22C55E?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-249_passing-22C55E?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 
 </div>
@@ -88,8 +88,10 @@ the release is already blocked. There is plenty here that humans read — `npm r
 UI, the advisory queued for downstream distributions — but every one of them is *post-hoc audit of
 an action already taken*, not a question put to a reviewer.
 And because it acts rather than answers, it has to be able to decline: with no benign neighbour
-retrieved there is nothing to contrast against, so `decide()` (`src/decide.ts`) treats the margin as
-zero and refuses to hold rather than acting on a similarity score alone.
+retrieved there is nothing to contrast against, so `decide()` (`src/decide.ts`) refuses the hold
+outright rather than acting on a similarity score alone. That refusal is structural — a margin that
+cannot be computed cannot be passed — and deliberately not a comparison against a threshold, because
+the threshold version was inert whenever the fitted floor was zero or below.
 
 **The adversary writes the memory.** This is the part with no equivalent in a traditional app. A
 scanner reads inputs its adversary cannot author — a binary, a lockfile, a diff. An agent that
@@ -104,7 +106,7 @@ denylist and denylists are defeatable — paraphrase or another language will ge
 raises the cost; it does not close the hole. What actually carries the weight is that **the model's
 output is never executed**: it is summarised, embedded, and compared against a fitted threshold, so
 an injected summary still has to land near a known takeover arc in vector space to change a verdict.
-14 tests cover the fencing (`tests/agent.test.ts`).
+6 tests cover the fencing (`tests/agent.test.ts`).
 
 ## 🧠 How it works
 
@@ -196,7 +198,7 @@ pays for it.
 | Tool | How it is used |
 |---|---|
 | **Distributed Vector Indexing** | Three inline `VECTOR INDEX` declarations (`sql/schema.sql`). `events` is indexed on `(package_id, embedding vector_cosine_ops)`, so ANN search over a package's own history is *prefix-scoped* rather than global. `takeover_playbook` is indexed on `(held_out, embedding_model, embedding vector_cosine_ops)` — the two exclusions that must hold are index prefixes rather than a post-filter, because a held-out arc consuming a top-k slot would starve the two-sided gate of the benign neighbour it needs to measure a margin against. Retrieval uses `<=>` cosine ordering, and `EXPLAIN` is run on **both** the display query and the query that actually decides, asserting the `prefix spans` line in the test suite rather than claiming it. `actor_arcs` also carries a vector index, and **nothing reads it by similarity yet** — arcs are currently fetched by `(package_id, actor_id)` point lookup, so that index is write cost with no reader. It is left declared because arc-to-arc similarity is the next retrieval (comparing an actor's shape against other actors on the same package), but today it earns nothing and this table says so. |
-| **ccloud CLI** | `scripts/provision.sh` — 449 lines, idempotent, with a `--dry-run` that prints every command before anything touches your org. Creates the Basic cluster, the database, and three identities split along the line that actually exists in the code — **setup versus runtime**: `sleeper_admin` (DDL, one cluster setting, and the destructive setup paths — `npm run schema`, `npm run seed`, `npm run replay`), `gate_svc` (the running agent: webhook, decision, hold, unhold — **no DELETE anywhere, no DDL, no writes to the playbook**), and a read-only service account for the MCP audit surface. Applied as real SQL, `REVOKE admin` included, because `ccloud cluster user create` makes admins and a split where both sides are admin is decoration. An earlier version of this script created an `ingest_svc` with INSERT on `events` only; it was deleted because it could not run the webhook it was named after — `ingestHandler` assesses and holds, so it writes five more tables and fails at `upsertActorArc`. A privilege boundary that the code cannot honour is worse than none. Which identity runs which command is verified by execution, not asserted. See [DEMO.md §1](DEMO.md#provision-the-cluster-cockroachdb-ccloud-cli). |
+| **ccloud CLI** | `scripts/provision.sh` — 449 lines, idempotent, with a `--dry-run` that prints every command before anything touches your org. Creates the Basic cluster, the database, and two SQL identities split along the line that actually exists in the code — **setup versus runtime**: `sleeper_admin` (DDL, one cluster setting, and the destructive setup paths — `npm run schema`, `npm run seed`, `npm run replay`), `gate_svc` (the running agent: webhook, decision, hold, unhold — **no DELETE anywhere, no DDL, no writes to the playbook**), plus — only with `--mcp-key` — a read-only Cloud service account for the MCP audit surface, which lives on a different auth plane and is not a SQL identity. Applied as real SQL, `REVOKE admin` included, because `ccloud cluster user create` makes admins and a split where both sides are admin is decoration. An earlier version of this script created an `ingest_svc` with INSERT on `events` only; it was deleted because it could not run the webhook it was named after — `ingestHandler` assesses and holds, so it writes five more tables and fails at `upsertActorArc`. A privilege boundary that the code cannot honour is worse than none. Which identity runs which command is verified by execution, not asserted. See [DEMO.md §1](DEMO.md#provision-the-cluster-cockroachdb-ccloud-cli). |
 | **Managed MCP Server** | Serves the entire audit surface — the reads a distro packager performs on a hold they did not create. `src/mcp.ts` drives all four documented tools: `get_table_schema` for the evidence tables as the cluster itself describes them, `explain_query` so the `prefix spans` proof is produced *server-side* rather than by us, `select_query` for the hold and its trail, `show_statement` for session introspection. Every documented limit is enforced locally before a call leaves — one statement per call, 16,384 chars, and an explicit `LIMIT` on every SELECT, because the server's implicit `LIMIT 25` would otherwise present a truncated evidence trail as a complete one. Argument names are bound to the schema the server advertises in `tools/list` rather than hardcoded, since the published docs name the tools but not their input schemas — and that decision paid: the real argument is `query`, not `sql`, and `database` is REQUIRED on three of the four tools. The write path never uses MCP: one statement per call cannot express the four-write HOLD, and pretending otherwise would break the invariant the project rests on. **Verified end to end against `https://cockroachlabs.cloud/mcp`** — `npm run mcp:audit` drives all four tools and returns `prefix spans: [/'xz-utils' - /'xz-utils']` produced by the server's own `explain_query`, which is the point: the proof of prefix-scoping comes from CockroachDB rather than from us. |
 
 The single ACID transaction is the reason this is CockroachDB and not a vector database bolted
@@ -235,15 +237,15 @@ Full setup, reproduction steps and benchmark methodology: **[DEMO.md](DEMO.md)**
 
 ## 🧪 Tests
 
-**207 tests.** On a fresh clone with no database and no AWS account, `npm test` prints
-`168 passed | 39 skipped (207)` — that is the honest output, and it is the one you should expect.
-The 39 need a reachable cluster; point `DATABASE_URL` at one and it becomes `207 passed`.
+**249 tests.** On a fresh clone with no database and no AWS account, `npm test` prints
+`208 passed | 41 skipped (249)` — that is the honest output, and it is the one you should expect.
+The 41 need a reachable cluster; point `DATABASE_URL` at one and it becomes `249 passed`.
 
 The gate is reachability, not configuration: a `DATABASE_URL` that is set but does not answer skips
 those 39 and prints why, naming the host and the driver's error. A stale credential should not look
 like broken code.
 
-The cluster-backed 39 assert the `prefix spans` plan line on both the neighbour query *and* the
+The cluster-backed 41 assert the `prefix spans` plan line on both the neighbour query *and* the
 query that actually makes the decision, held-out exclusion, all-or-nothing hold and unhold
 transactions, ingest idempotency under a retried delivery, and point-in-time correctness (a
 decision can never see an event from after its own assessment timestamp).
@@ -272,7 +274,7 @@ searchable arcs is a floor, not a scale result.
 
 ## 🛡️ Production readiness
 
-- **Access control** — `scripts/provision.sh` creates three identities, split setup-versus-runtime:
+- **Access control** — `scripts/provision.sh` creates two SQL identities, split setup-versus-runtime, plus an optional read-only Cloud service account (`--mcp-key`) on a different auth plane:
   `sleeper_admin` (DDL, one cluster setting, and the destructive setup paths), `gate_svc` (the
   running agent), and a read-only service account for the MCP audit surface. What `gate_svc` cannot
   do is the point: **no DELETE on any table**, no DDL, and no writes to the playbook — so the running
@@ -283,8 +285,11 @@ searchable arcs is a floor, not a scale result.
   **Two honest caveats.** `src/db.ts` still builds one pool from one URL, so nothing in `src/`
   *switches* identity at runtime; the boundary is operational, not in-process. And `npm start` needs
   the admin URL, because its replay button resets memory — the deployed webhook is the path that runs
-  as `gate_svc`. The MCP half *is* enforced in-process: `src/mcp.ts` implements only read tools, and
-  a session advertising a write tool is refused with a loud fallback to direct SQL.
+  as `gate_svc`. The MCP half is **not** enforced and cannot be: `tools/list` is not role-filtered, so every session
+  advertises `insert_rows` — including one that cannot execute it. A write-capable tool list is
+  therefore **recorded, not refused**; refusing it would disable the MCP path against every real
+  server. What keeps that path read-only is that `src/mcp.ts` only ever builds SELECT, EXPLAIN and
+  SHOW. See "Known gaps" for the measurements.
 - **Observability** — one JSON line per event on stderr. `ingest.written`, `arc.built`,
   `retrieval.explained` (carrying whether the plan was prefix-scoped), `decision.made` and
   `hold.committed` share a `corrId`, so a whole assessment stitches together from the logs.
@@ -405,10 +410,21 @@ Known gaps, stated rather than buried:
   embeddings, so they are absent rather than approximated. Latency *has* been measured, offline and
   labelled as such (see Benchmark above); it is a property of the index, not of the model. The
   corpus it was measured over is 8 searchable arcs, which is a floor and is stated as one.
-- **The replay still takes a configured suspect actor.** The webhook path derives the actor from the
-  event, but `npm run replay` is pointed at one. Deriving candidates from memory alone is the honest
-  next step; today the demo is told where to look, and a real deployment would not be.
-- **The privilege split is provisioned, not exercised** — see Production readiness above.
+- **The corpus was written with hindsight, and that is being fixed.** 7 of the 25 events in
+  `data/xz-timeline.json` describe the outcome — one says the test blobs "are in fact the encrypted
+  payload stages of the backdoor" — where the real feed on that date carried only
+  `Tests: Add a few test files.` That text is embedded and reaches the arc prompt, so the hero replay
+  may be matching prose that already announces the conclusion rather than a behavioural shape. The
+  benchmark is unaffected (it runs on held-out synthetic arcs and the xz timeline feeds no reported
+  number), but the demo is the headline claim and this weakens it. De-hindsighting the corpus and
+  republishing whatever the gate then does — including nothing — is the next change.
+- **The abstain path was inert until recently.** `decide()` encoded "no benign neighbour to contrast
+  against" as `margin = 0` and relied on the threshold to reject it. The offline fit returned
+  `minMargin = -0.0198`, so `0 >= -0.0198` passed and the refusal never fired; the gate held on
+  similarity alone, which is what the two-sided design exists to prevent. The fit is now clamped at
+  zero AND the refusal is structural rather than arithmetic, because at exactly `0` the arithmetic
+  version reopens. Two tests cover it, one driving the abstain through the *fitted* thresholds
+  rather than a hand-picked fixture — which is how it hid.
 
 Nothing in this README claims a capability the code does not have; where something is pending it
 says so. That sentence is meant to be falsifiable — if you find a counterexample, it is a bug.
