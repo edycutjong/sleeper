@@ -1044,8 +1044,10 @@
             logs</strong>. A downstream distro packager audits it in one statement. The reader resolves at
             runtime: with <code>COCKROACH_MCP_API_KEY</code> set the reads go through the Managed MCP
             Server, otherwise over the pg pool — and every run prints which path it took, verbatim,
-            before any output. That MCP path has <strong>not yet been run against the live server</strong>
-            (<a href="#stack">status below</a>).
+            before any output. That MCP path is <strong>verified against the live Cloud server</strong> —
+            <code>npm run mcp:audit</code> drives all four tools, and <code>explain_query</code> returns
+            <code>prefix spans: [/'xz-utils' - /'xz-utils']</code> computed by CockroachDB rather than by us
+            (<a href="#stack">detail below</a>).
           </p>
         </div>
         <div class="codebox">
@@ -1102,15 +1104,25 @@ npm run explain -- --hold <uuid>">copy</button></div>
               reads everything and writes only the tables a hold touches. Both have <code>admin</code>
               revoked, and neither can delete. Executable <code>GRANT</code>s, not a README claim.
             </dd>
-            <dt>Managed MCP Server <span class="status pending">client built, not yet verified live</span></dt>
+            <dt>Managed MCP Server <span class="status">verified against the live Cloud server</span></dt>
             <dd>
-              A unit-tested client in <code>src/mcp.ts</code> drives four MCP read tools —
-              <code>select_query</code>, <code>explain_query</code>, <code>get_table_schema</code>,
-              <code>show_statement</code> — putting an explicit <code>LIMIT</code> on every SELECT, because
-              the server silently caps an unlimited one at 25 rows and a truncated evidence trail must not
-              pass as complete. It has <strong>not yet been run against the live Managed MCP Server</strong>
-              (<code>npm run mcp:audit</code> is the entry point); today the same reads take the direct-SQL
-              fallback, which every run prints.
+              <code>src/mcp.ts</code> drives four MCP read tools — <code>select_query</code>,
+              <code>explain_query</code>, <code>get_table_schema</code>, <code>show_statement</code> —
+              putting an explicit <code>LIMIT</code> on every SELECT, because the server silently caps an
+              unlimited one at 25 rows and a truncated evidence trail must not pass as complete.
+              <code>npm run mcp:audit</code> runs all four end to end against
+              <code>cockroachlabs.cloud/mcp</code>.
+              <br /><br />
+              Binding argument names to the schema the server advertises, instead of hardcoding them,
+              is what made that first live run survivable: the real argument is <code>query</code>,
+              not <code>sql</code>, and <code>database</code> is required on three of the four tools.
+              <br /><br />
+              The run also disproved something this page used to claim. The audit path is <em>not</em>
+              read-only at the protocol layer: <code>tools/list</code> is not role-filtered, so
+              <code>insert_rows</code> is advertised to every identity — including one that cannot execute
+              a single call — and no CockroachDB Cloud role grants MCP reads without also granting writes.
+              What keeps this path read-only is that the client only ever builds SELECT, EXPLAIN and SHOW.
+              The enforced boundary is at the SQL layer, above.
             </dd>
           </dl>
         </div>

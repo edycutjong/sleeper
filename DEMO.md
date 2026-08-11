@@ -608,6 +608,111 @@ with §2's real decision behind it and Claude's wording in those two fields.
 
 ---
 
+## 2c. The Managed MCP Server, against the live server
+
+The audit surface — the reads a distro packager performs on a hold they did not create — runs over
+the CockroachDB Cloud Managed MCP Server. This section is the transcript of it doing so.
+
+```bash
+./scripts/provision.sh --cluster <your-cluster> --mcp-key   # service account + API key
+# put COCKROACH_MCP_API_KEY and COCKROACH_CLUSTER_ID in .env
+npm run mcp:audit
+```
+
+### Connect, and what the session actually advertises
+
+```
+1. CONNECT — CockroachDB Cloud Managed MCP Server
+──────────────────────────────────────────────────────────────────────────────
+  endpoint:      https://cockroachlabs.cloud/mcp
+  auth:          Authorization: Bearer <COCKROACH_MCP_API_KEY>
+  cluster pin:   mcp-cluster-id: 19280cd0-acbf-4b25-bf6a-c75bbc805212
+
+  tools/list → 12 tools advertised:
+    create_database        Create a new database in the cluster
+    create_table           Create a new table in a database using a CREATE TABLE DDL statement. Only CREATE TABLE statements are allowed. Supports CREATE TABLE AS SELECT for creating tables from query results.
+    explain_query          Show query execution plan without executing the query
+    get_cluster            Get detailed information for the CockroachDB cluster
+    get_table_schema       Get detailed schema information for a table including columns and indexes
+    insert_rows            Insert rows into an existing table. Only INSERT statements are allowed, including INSERT INTO ... VALUES and INSERT INTO ... SELECT.
+    list_clusters          List all CockroachDB clusters accessible to the authorized user
+    list_databases         List all databases in the CockroachDB cluster.
+    list_tables            List all tables in a database.
+    select_query           Execute a read-only SELECT query on the CockroachDB cluster.
+Automatically adds LIMIT 25 if not specified. Maximum LIMIT is 10000.
+Use LIMIT with OFFSET for pagination (e.g., LIMIT 100 OFFSET 200).
+    show_running_queries   List currently executing queries on the cluster
+    show_statement         Execute a SHOW statement for introspection (e.g., SHOW SCHEMAS, SHOW INDEXES, SHOW REGIONS, SHOW CONSTRAINTS).
+Results are limited to 100 rows by default. Prefer list_databases, list_tables, or get_table_schema for those operations.
+
+  tools this project drives: get_table_schema, select_query, explain_query, show_statement
+  ✓ all present
+
+  ⓘ This MCP session advertises write-capable tools: create_database, create_table, insert_rows. That is expected and is NOT a misconfiguration: tools/list is not role-filtered, and no CockroachDB Cloud role grants MCP reads without also granting writes. This path stays read-only because this client implements only read tools — not because the server stops us.
+
+  Advertised:    create_database, create_table, explain_query, get_cluster, get_table_schema, insert_rows, list_clusters, list_databases, list_tables, select_query, show_running_queries, show_statement
+  Write-capable: create_database, create_table, insert_rows
+
+  What keeps the evidence below read-only is that this client builds only SELECT,
+  EXPLAIN and SHOW statements — not the tool list, and not the role. A boundary you
+  want enforced belongs at the SQL layer (see gate_svc) or in front of the credential.
+```
+
+**The read-only claim in an earlier version of this document was wrong, and the first live run is
+what proved it.** `tools/list` is not role-filtered: `create_database`, `create_table` and
+`insert_rows` are advertised to every identity — including a service account with no cluster role
+at all, which cannot execute a single call. And no CockroachDB Cloud role grants MCP reads without
+also granting writes (`CLUSTER_DEVELOPER` gets neither; `CLUSTER_ADMIN` gets both). So this path is
+read-only because **the client only ever builds SELECT, EXPLAIN and SHOW** — client-side discipline,
+not a boundary the server enforces. The enforced boundary is at the SQL layer: `gate_svc` is
+refused `DELETE` with SQLSTATE 42501.
+
+### The plan, computed by CockroachDB rather than by us
+
+```
+4. explain_query — the prefix-scoped ANN plan, produced server-side
+──────────────────────────────────────────────────────────────────────────────
+  {"rows":[{"info":"distribution: local"},{"info":""},{"info":"• filter"},{"info":"│ estimated row count: 1"},{"info":"│ filter: embedding_model = 'amazon.titan-embed-text-v2:0'"},{"info":"│"},{"info":"└── • top-k"},{"info":"    │ estimated row count: 1"},{"info":"    │ order: +column16"},{"info":"    │ k: 20"},{"info":"    │"},{"info":"    └── • render"},{"info":"        │"},{"info":"        └── • lookup join"},{"info":"            │ table: events@events_pkey"},{"info":"            │ equality: (id) = (id)"},{"info":"            │ equality cols are key"},{"info":"            │"},{"info":"            └── • vector search"},{"info":"                  table: events@events_pkg_embedding_idx"},{"info":"                  target count: 20"},{"info":"                  prefix spans: [/'xz-utils' - /'xz-utils']"}]}
+
+  prefix spans present: YES   vector search: YES
+```
+
+That `prefix spans` line is the whole argument for this integration. The claim throughout this repo
+is that retrieval is scoped to one package by the leading vector-index column instead of scanning
+globally — and here the proof is produced by the server, over the same statement the agent runs,
+returned to a client that could not have fabricated it.
+
+### Tools exercised
+
+```
+MCP TOOL CALLS MADE, IN ORDER
+──────────────────────────────────────────────────────────────────────────────
+   1. tools/list
+   2. show_statement
+   3. get_table_schema
+   4. get_table_schema
+   5. get_table_schema
+   6. explain_query
+   7. select_query
+
+  distinct MCP tools exercised: 4 (show_statement, get_table_schema, explain_query, select_query)
+```
+
+### What the first live run cost, and what it bought
+
+Three things were guesses until this ran, and two of them were wrong:
+
+| assumption | reality |
+|---|---|
+| the SQL argument is `sql` | it is `query` |
+| `database` is optional | REQUIRED on `select_query`, `explain_query`, `get_table_schema`; optional on `show_statement` and fatal without it, because a session pinned by `mcp-cluster-id` has no session database |
+| `SHOW DATABASE` works | refused — `show_statement` takes an introspection subset |
+
+Binding argument names to the schema the server advertises in `tools/list`, rather than hardcoding
+them, is why the first two cost an afternoon instead of a rewrite.
+
+---
+
 ## 3. Benchmark
 
 ```bash
