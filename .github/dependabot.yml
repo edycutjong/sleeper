@@ -1,0 +1,20 @@
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # One PR for the AWS SDK rather than five: they release in lockstep and reviewing them
+      # separately is noise, not diligence.
+      aws-sdk:
+        patterns: ['@aws-sdk/*']
+      dev-tooling:
+        patterns: ['typescript', 'vitest', 'tsx', '@types/*']
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

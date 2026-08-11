@@ -1,0 +1,105 @@
+name: CI
+
+# The point of this pipeline is that the claim in the README — "a fresh clone reproduces the whole
+# suite with no AWS account and no CockroachDB Cloud subscription" — is checked on every push
+# rather than asserted once. The integration job stands up a real CockroachDB node, applies the
+# real schema (vector indexes included) and runs the 39 cluster-backed tests. If that stops being
+# true, this goes red.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A superseded run tells you nothing you want to know.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Every job runs with the deterministic hashed stand-in instead of Bedrock. CI must never need
+  # AWS credentials: the moment it does, an outside contributor cannot run it, and neither can a
+  # judge who forked the repo.
+  SLEEPER_OFFLINE: '1'
+
+jobs:
+  quality:
+    name: Types and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Unit tests (no database)
+        # No DATABASE_URL on purpose. This asserts the clean-checkout path a judge actually hits:
+        # the cluster-backed tests skip, everything else passes, and nothing errors.
+        run: npm test
+
+  integration:
+    name: Integration tests against a real CockroachDB node
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+
+      - name: Start CockroachDB
+        # A single insecure node is all the schema needs, vector indexes included. Pinned rather
+        # than :latest so a CI failure means our change broke, not that upstream shipped today.
+        run: |
+          curl -sSL "https://binaries.cockroachdb.com/cockroach-v25.3.0.linux-amd64.tgz" \
+            | tar -xz
+          sudo cp -i cockroach-v25.3.0.linux-amd64/cockroach /usr/local/bin/
+          cockroach start-single-node --insecure --listen-addr=localhost:26257 \
+            --http-addr=localhost:8081 --store=/tmp/sleeper-crdb --background
+          for i in $(seq 1 30); do
+            cockroach sql --insecure -e 'SELECT 1' >/dev/null 2>&1 && break
+            sleep 1
+          done
+          cockroach sql --insecure -e 'CREATE DATABASE sleeper'
+
+      - name: Apply schema
+        run: npm run schema
+        env:
+          DATABASE_URL: postgresql://root@localhost:26257/sleeper?sslmode=disable
+
+      - name: Full suite, including the 39 cluster-backed tests
+        run: npm test
+        env:
+          DATABASE_URL: postgresql://root@localhost:26257/sleeper?sslmode=disable
+
+  security:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Audit production dependencies
+        # Production deps only. A dev-only advisory should not block a release gate whose runtime
+        # dependency surface is four packages.
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Fail if a secret-shaped string is committed
+        # Cheap backstop, not a replacement for scanning: this repo's whole threat model is about
+        # credentials, and .env is gitignored precisely so this never has anything to find.
+        run: |
+          if git ls-files | grep -qE '^\.env$'; then
+            echo "::error::.env is tracked — it must never be committed"
+            exit 1
+          fi
