@@ -45,9 +45,22 @@ set -euo pipefail
 CLUSTER="${SLEEPER_CLUSTER:-sleeper-cluster}"
 DATABASE="${SLEEPER_DATABASE:-sleeper}"
 SA_NAME="${SLEEPER_MCP_SA:-sleeper-mcp}"
-# Least-privileged cluster-scoped role in CockroachDB Cloud's RBAC. The MCP audit path only ever
-# reads; if your org names its roles differently, override this rather than reaching for admin.
-MCP_ROLE="${SLEEPER_MCP_ROLE:-CLUSTER_DEVELOPER}"
+# CLUSTER_ADMIN, and not because we like it. Measured against the live Managed MCP Server:
+#
+#   ORG_MEMBER only     tools/list = 12 tools;  EVERY call -> unauthorized
+#   CLUSTER_DEVELOPER   tools/list = 12 tools;  EVERY call -> unauthorized
+#   CLUSTER_ADMIN       tools/list = 12 tools;  select_query OK, insert_rows reaches execution
+#
+# So there is no least-privileged role that can read over MCP. CLUSTER_DEVELOPER — which this
+# script defaulted to for exactly the reason the old comment gave — provisions an identity that
+# cannot make a single tool call, and `npm run mcp:audit` then fails on every step while
+# `resolveSqlReader` quietly degrades the demo to direct SQL.
+#
+# Note what this means rather than glossing it: the MCP audit credential is write-capable, so it is
+# NOT the thing to hand an external distro packager. The read-only boundary that does exist is
+# `gate_svc` below (no DELETE anywhere, no DDL, no playbook writes) — a SQL-layer boundary the
+# server actually enforces. Override this only if your org has a role we have not tested.
+MCP_ROLE="${SLEEPER_MCP_ROLE:-CLUSTER_ADMIN}"
 CLOUD="GCP"
 REGION=""
 MAKE_MCP_KEY=0
@@ -372,9 +385,10 @@ if [ "$MAKE_MCP_KEY" = "1" ]; then
     [ "$DRY_RUN" = "1" ] || ok "created${SA_ID:+ ($SA_ID)}"
   fi
 
-  # Cluster-scoped, read-only. The MCP write tools (create_table / insert_rows) are only exposed
-  # when write access is granted at auth — this identity must never have it, because the audit
-  # path is the one surface a distro packager touches and it has no business writing anything.
+  # This comment used to say the MCP write tools are "only exposed when write access is granted at
+  # auth". That is false, and the first live run disproved it: `tools/list` advertises
+  # create_database, create_table and insert_rows to EVERY identity — including one that cannot
+  # execute any of them. The tool list is a menu, not a permission set. See MCP_ROLE above.
   if [ -n "${SA_ID:-}" ] && [ -n "${CLUSTER_ID:-}" ]; then
     run ccloud role add "$SA_ID" "$MCP_ROLE" CLUSTER "$CLUSTER_ID" \
       || warn "could not grant $MCP_ROLE on CLUSTER $CLUSTER_ID — assign a READ-ONLY cluster role

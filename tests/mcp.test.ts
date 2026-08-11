@@ -13,6 +13,7 @@ import { describe, expect, it } from 'vitest'
 import { config } from '../src/config.js'
 import {
   CockroachMcpClient,
+  type McpClientOptions,
   MCP_ENDPOINT,
   MCP_MAX_STATEMENT_CHARS,
   MCP_TOOLS,
@@ -84,9 +85,14 @@ function fakeServer(options: {
   return { client, sent, isClosed: () => closed }
 }
 
-async function connected(options?: Parameters<typeof fakeServer>[0]) {
+async function connected(
+  options?: Parameters<typeof fakeServer>[0] & { options?: Partial<McpClientOptions> },
+) {
   const server = fakeServer(options)
-  const client = new CockroachMcpClient({ clientFactory: async () => server.client }, 'test')
+  const client = new CockroachMcpClient(
+    { clientFactory: async () => server.client, ...(options?.options ?? {}) },
+    'test',
+  )
   await client.connect()
   return { client, server }
 }
@@ -617,6 +623,48 @@ describe('CockroachMcpClient — request shaping and limits, end to end without 
     await client.tableSchema('events', 'sleeper')
     expect(server.sent).toHaveLength(1)
     expect(server.sent[0]!.args).toEqual({ table: 'events', database: 'sleeper' })
+  })
+
+  // The injection that supplies `database` on every tool that wants one was originally written
+  // against the literal property name, which passes against the real server purely because that
+  // server spells it `database`. This is the matrix that catches the regression: a server using any
+  // documented alias, REQUIRED or optional, must still receive the database.
+  //
+  // Required-under-an-alias is the dangerous case. `resolveSqlReader` only wraps `connect()`, so a
+  // throw at call time gets no fallback to direct SQL — the evidence trail dies half-rendered with
+  // a 500 rather than degrading.
+  for (const alias of ['database', 'database_name', 'databaseName', 'db'] as const) {
+    it(`injects the database when the server declares it as "${alias}" and REQUIRES it`, async () => {
+      const { client, server } = await connected({
+        tools: [toolDef(MCP_TOOLS.tableSchema, { table: {}, [alias]: {} }, ['table', alias])],
+        respond: () => ({ content: [{ type: 'text', text: 'CREATE TABLE …' }] }),
+        options: { database: 'sleeper' },
+      })
+      await client.tableSchema('events')
+      expect(server.sent[0]!.args).toEqual({ table: 'events', [alias]: 'sleeper' })
+    })
+
+    it(`injects the database when the server declares it as "${alias}" and it is OPTIONAL`, async () => {
+      // Silently omitting it here is what produced `relation "takeover_playbook" does not exist`
+      // against a cluster-pinned session: optional in the schema, required in practice.
+      const { client, server } = await connected({
+        tools: [toolDef(MCP_TOOLS.tableSchema, { table: {}, [alias]: {} }, ['table'])],
+        respond: () => ({ content: [{ type: 'text', text: 'CREATE TABLE …' }] }),
+        options: { database: 'sleeper' },
+      })
+      await client.tableSchema('events')
+      expect(server.sent[0]!.args).toEqual({ table: 'events', [alias]: 'sleeper' })
+    })
+  }
+
+  it('sends no database to a server that declares none, under any spelling', async () => {
+    const { client, server } = await connected({
+      tools: [toolDef(MCP_TOOLS.tableSchema, { table: {} }, ['table'])],
+      respond: () => ({ content: [{ type: 'text', text: 'CREATE TABLE …' }] }),
+      options: { database: 'sleeper' },
+    })
+    await client.tableSchema('events')
+    expect(server.sent[0]!.args).toEqual({ table: 'events' })
   })
 
   it('holds selectRaw to the same LIMIT guard as select, and reports the encoding', async () => {

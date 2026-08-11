@@ -851,9 +851,24 @@ export class CockroachMcpClient implements SqlReader {
     // environment in here would make the shape of an outgoing call depend on whether DATABASE_URL
     // happens to be set in the process, which is exactly the kind of ambient coupling that makes a
     // unit test pass on one machine and fail on another. Callers resolve it; see `resolveSqlReader`.
+    // Detect the database argument through ARG_ALIASES, not by the literal name.
+    //
+    // The first version of this checked `declared.includes('database')`, which works against the
+    // real server only because that server happens to spell it `database`. That is precisely the
+    // assumption this whole client exists to avoid: the published docs name the tools but not their
+    // argument schemas (see the header), so `shapeArguments` binds every OTHER argument to whatever
+    // the server advertises — and then the injection hardcoded one spelling and defeated it.
+    //
+    // Two ways that bit, both reproduced against stand-in servers: a server declaring
+    // `database_name` as REQUIRED made three of four tools throw at CALL time — and
+    // `resolveSqlReader` only wraps `connect()`, so there is no fallback and `/api/explain` returns
+    // 500 mid-evidence-trail; a server declaring it OPTIONAL under an alias silently sent no
+    // database at all, resurrecting the `relation "..." does not exist` bug this injection was
+    // added to fix.
     const declared = Object.keys(tool.inputSchema?.properties ?? {})
+    const declaresDatabase = (ARG_ALIASES.database ?? ['database']).some((a) => declared.includes(a))
     const withDatabase =
-      declared.includes('database') && params.database === undefined && this.options.database
+      declaresDatabase && params.database === undefined && this.options.database
         ? { ...params, database: this.options.database }
         : params
 
