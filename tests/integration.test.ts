@@ -45,6 +45,9 @@ const LIVE = liveCluster
 // with the demo without touching xz-utils rows.
 const PKG = `test-pkg-${process.pid}`
 const OTHER_PKG = `test-other-${process.pid}`
+// Two more, owned by the trust-state invariant test at the bottom of the file.
+const ONLY_CITING = `${PKG}-clear-only-citing`
+const ALSO_UNCITED = `${PKG}-clear-also-uncited`
 const ACTOR = 'test-actor'
 const ASOF = new Date('2024-02-24T00:00:00Z')
 
@@ -55,6 +58,136 @@ async function seedEvent(kind: string, content: string, occurredAt: string, pkg 
     { packageId: pkg, actorId: ACTOR, kind, content, occurredAt },
     offlineEmbed(content),
   )
+}
+
+type ArcRow = {
+  id: string
+  package_id: string
+  label: string
+  source: string
+  held_out: boolean
+  arc_summary: string
+  embedding: string
+  embedding_model: string
+  embedding_dims: number
+}
+type HoldRow = {
+  id: string
+  package_id: string
+  release_version: string
+  reason: string
+  matched_playbook_id: string | null
+  similarity: number
+  created_at: Date
+  resolution: string | null
+  resolved_by: string | null
+  resolved_at: Date | null
+  resolution_note: string | null
+}
+type AdvisoryRow = { id: string; release_hold_id: string; advisory_text: string; sent: boolean; created_at: Date }
+type AuditRow = { id: string; release_hold_id: string; actor: string; action: string; detail: string | null; created_at: Date }
+type ForeignRows = { arcs: ArcRow[]; holds: HoldRow[]; advisories: AdvisoryRow[]; audit: AuditRow[] }
+
+/**
+ * Everything in the cluster that this suite does NOT own, captured so a forced `clearPlaybook` can
+ * be undone.
+ *
+ * `clearPlaybook` has no package scope and cannot have one — the corpus is global by design, that
+ * is the whole point of matching a shape learned in one ecosystem from another package. So the
+ * forced path deletes every playbook row in the cluster and, with it, every hold that cites one.
+ * DEMO.md tells a judge to point this suite at the same cluster the demo runs on, so any test that
+ * reaches for the escape hatch snapshots the rows it does not own and puts them back afterwards,
+ * ids included. A test that ate the demo's hold in order to prove that holds are safe would be a
+ * poor joke.
+ */
+async function snapshotForeignRows(ownArcIds: string[], ownPackages: string[]): Promise<ForeignRows> {
+  const arcs = await query<ArcRow>(
+    `SELECT id, package_id, label, source, held_out, arc_summary, embedding::STRING AS embedding,
+            embedding_model, embedding_dims
+     FROM takeover_playbook WHERE NOT (id = ANY($1))`,
+    [ownArcIds],
+  )
+  const holds = await query<HoldRow>(
+    'SELECT * FROM release_hold WHERE NOT (package_id = ANY($1))',
+    [ownPackages],
+  )
+  const holdIds = holds.rows.map((r) => r.id)
+  const advisories = holdIds.length
+    ? (await query<AdvisoryRow>('SELECT * FROM distro_advisory_outbox WHERE release_hold_id = ANY($1)', [holdIds])).rows
+    : []
+  const audit = holdIds.length
+    ? (await query<AuditRow>('SELECT * FROM audit_log WHERE release_hold_id = ANY($1)', [holdIds])).rows
+    : []
+  return { arcs: arcs.rows, holds: holds.rows, advisories, audit }
+}
+
+/**
+ * Puts a snapshot back, in foreign-key order: arcs, then the holds that cite them, then their
+ * advisories and audit rows. Ids are preserved so anything that cited a restored row — `npm run
+ * explain -- --hold <uuid>` in DEMO.md, for one — still resolves.
+ *
+ * Every insert is ON CONFLICT DO NOTHING because the clear is deliberately PARTIAL: only holds that
+ * cite the corpus are forced out by the foreign key, so a pre-existing hold that cites nothing is
+ * still sitting there, untouched, along with its advisory and audit rows. Restoring unconditionally
+ * would collide with the rows that never left.
+ */
+async function restoreForeignRows(rows: ForeignRows): Promise<void> {
+  for (const a of rows.arcs) {
+    await query(
+      `INSERT INTO takeover_playbook
+         (id, package_id, label, source, held_out, arc_summary, embedding, embedding_model, embedding_dims)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::VECTOR, $8, $9)
+       ON CONFLICT (id) DO NOTHING`,
+      [a.id, a.package_id, a.label, a.source, a.held_out, a.arc_summary, a.embedding, a.embedding_model, a.embedding_dims],
+    )
+  }
+  for (const h of rows.holds) {
+    await query(
+      `INSERT INTO release_hold
+         (id, package_id, release_version, reason, matched_playbook_id, similarity, created_at,
+          resolution, resolved_by, resolved_at, resolution_note)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       ON CONFLICT (id) DO NOTHING`,
+      [h.id, h.package_id, h.release_version, h.reason, h.matched_playbook_id, h.similarity,
+       h.created_at, h.resolution, h.resolved_by, h.resolved_at, h.resolution_note],
+    )
+  }
+  for (const d of rows.advisories) {
+    await query(
+      `INSERT INTO distro_advisory_outbox (id, release_hold_id, advisory_text, sent, created_at)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (id) DO NOTHING`,
+      [d.id, d.release_hold_id, d.advisory_text, d.sent, d.created_at],
+    )
+  }
+  for (const l of rows.audit) {
+    await query(
+      `INSERT INTO audit_log (id, release_hold_id, actor, action, detail, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (id) DO NOTHING`,
+      [l.id, l.release_hold_id, l.actor, l.action, l.detail, l.created_at],
+    )
+  }
+}
+
+/**
+ * Every package whose `trust_state` says 'held' while no open hold exists to justify it.
+ *
+ * Deliberately unscoped: this is a cluster-wide invariant, not a property of one test's rows. The
+ * whole demo rests on it — a package that claims to be held and can produce no hold, no advisory
+ * and no audit row is the single most damaging state this UI can be in, and it is indistinguishable
+ * from a lost paper trail.
+ */
+async function orphanedHeldPackages(): Promise<string[]> {
+  const result = await query<{ package_id: string }>(
+    `SELECT t.package_id FROM trust_state t
+      WHERE t.status = 'held'
+        AND NOT EXISTS (
+          SELECT 1 FROM release_hold h WHERE h.package_id = t.package_id AND h.resolution IS NULL
+        )
+      ORDER BY t.package_id`,
+  )
+  return result.rows.map((r) => r.package_id)
 }
 
 describe.skipIf(!LIVE)('CockroachDB memory layer', () => {
@@ -92,7 +225,11 @@ describe.skipIf(!LIVE)('CockroachDB memory layer', () => {
   afterAll(async () => {
     await resetPackage(PKG)
     await resetPackage(OTHER_PKG)
-    await query('DELETE FROM trust_state WHERE package_id = ANY($1)', [[PKG, OTHER_PKG]])
+    await resetPackage(ONLY_CITING)
+    await resetPackage(ALSO_UNCITED)
+    await query('DELETE FROM trust_state WHERE package_id = ANY($1)', [
+      [PKG, OTHER_PKG, ONLY_CITING, ALSO_UNCITED],
+    ])
     if (playbookIds.length) {
       await query('DELETE FROM takeover_playbook WHERE id = ANY($1)', [playbookIds])
     }
@@ -243,6 +380,56 @@ describe.skipIf(!LIVE)('CockroachDB memory layer', () => {
     const neighbours = await scopedNeighbours(PKG, offlineEmbed('build system changes'), 20)
     expect(neighbours.length).toBeGreaterThan(0)
     expect(neighbours.every((n) => n.packageId === PKG)).toBe(true)
+  })
+
+  /**
+   * The README claims a corpus written by a different embedding model "cannot be searched at all
+   * rather than silently returning meaningless neighbours". That was true of `takeover_playbook`,
+   * where the model id is an index prefix column, and false of `events`, which stored the model
+   * and never filtered on it — so a cluster holding offline vectors that a Bedrock run later
+   * extended would serve cross-model neighbours to `/api/explain` as retrieval evidence.
+   *
+   * The row is inserted through raw SQL because there is no way to reach this state through
+   * `ingestEvent`: it stamps whatever model the process is running. Which is the point — the state
+   * arrives from a SECOND process, embedding the same package with a different model.
+   */
+  it('never returns a neighbour embedded by a different model', async () => {
+    const content = 'reworks the autoconf build system and CI matrix'
+    const foreignKey = `${PKG}-foreign-model-key`
+    await query(
+      `INSERT INTO events
+         (package_id, actor_id, kind, content, occurred_at, event_key, embedding,
+          embedding_model, embedding_dims)
+       VALUES ($1, $2, 'commit', $3, '2022-06-02T00:00:00Z', $4, $5::VECTOR, $6, 1024)`,
+      [PKG, ACTOR, content, foreignKey, `[${offlineEmbed(content).join(',')}]`, 'some-other-model-1024'],
+    )
+
+    try {
+      // Embedded from the same text as a real row, so it is a *nearest* neighbour by construction:
+      // if the filter were missing this would sit at or near the top of the panel.
+      const neighbours = await scopedNeighbours(PKG, offlineEmbed(content), 20)
+      expect(neighbours.length).toBeGreaterThan(0)
+      const ids = neighbours.map((n) => n.id)
+      const foreign = await query<{ id: string }>('SELECT id FROM events WHERE event_key = $1', [
+        foreignKey,
+      ])
+      expect(ids).not.toContain(foreign.rows[0]!.id)
+
+      const models = await query<{ embedding_model: string }>(
+        'SELECT DISTINCT embedding_model FROM events WHERE id = ANY($1::UUID[])',
+        [ids],
+      )
+      expect(models.rows.map((r) => r.embedding_model)).toEqual([OFFLINE_EMBEDDING_MODEL])
+
+      // The filter must not have cost the plan. `events` cannot pre-filter on the model — it is not
+      // an index prefix column there — so the guarantee is "never returned", not "never descended
+      // into", and the vector search itself has to stay exactly as scoped as it was.
+      const explain = await explainScoped(PKG, offlineEmbed(content))
+      expect(explain.usedVectorIndex).toBe(true)
+      expect(explain.prefixScoped).toBe(true)
+    } finally {
+      await query('DELETE FROM events WHERE event_key = $1', [foreignKey])
+    }
   })
 
   it('proves prefix scoping through EXPLAIN — the claim the demo makes on camera', async () => {
@@ -534,61 +721,13 @@ describe.skipIf(!LIVE)('CockroachDB memory layer', () => {
   })
 
   /**
-   * Runs LAST, because it executes the one genuinely destructive statement in the codebase.
-   *
-   * `clearPlaybook` has no package scope and cannot have one — the corpus is global by design, that
-   * is the whole point of matching a shape learned in one ecosystem from another package. So the
-   * forced path deletes every playbook row in the cluster and, with it, every hold that cites one.
-   * DEMO.md tells a judge to point this suite at the same cluster the demo runs on, so the test
-   * snapshots every row it does not own and puts it back afterwards, ids included. A test that ate
-   * the demo's hold in order to prove that holds are safe would be a poor joke.
+   * Runs LAST — with the invariant check below it — because it executes the one genuinely
+   * destructive statement in the codebase. See `snapshotForeignRows` for what that costs and why
+   * the suite is still safe to point at the demo's own cluster.
    */
   it('clears the corpus without taking an unrelated package’s paper trail with it', async () => {
-    type ArcRow = {
-      id: string
-      package_id: string
-      label: string
-      source: string
-      held_out: boolean
-      arc_summary: string
-      embedding: string
-      embedding_model: string
-      embedding_dims: number
-    }
-    type HoldRow = {
-      id: string
-      package_id: string
-      release_version: string
-      reason: string
-      matched_playbook_id: string | null
-      similarity: number
-      created_at: Date
-      resolution: string | null
-      resolved_by: string | null
-      resolved_at: Date | null
-      resolution_note: string | null
-    }
-    type AdvisoryRow = { id: string; release_hold_id: string; advisory_text: string; sent: boolean; created_at: Date }
-    type AuditRow = { id: string; release_hold_id: string; actor: string; action: string; detail: string | null; created_at: Date }
-
     const mine = [PKG, OTHER_PKG]
-    const foreignArcs = await query<ArcRow>(
-      `SELECT id, package_id, label, source, held_out, arc_summary, embedding::STRING AS embedding,
-              embedding_model, embedding_dims
-       FROM takeover_playbook WHERE NOT (id = ANY($1))`,
-      [playbookIds],
-    )
-    const foreignHolds = await query<HoldRow>(
-      'SELECT * FROM release_hold WHERE NOT (package_id = ANY($1))',
-      [mine],
-    )
-    const foreignHoldIds = foreignHolds.rows.map((r) => r.id)
-    const foreignAdvisories = foreignHoldIds.length
-      ? (await query<AdvisoryRow>('SELECT * FROM distro_advisory_outbox WHERE release_hold_id = ANY($1)', [foreignHoldIds])).rows
-      : []
-    const foreignAudit = foreignHoldIds.length
-      ? (await query<AuditRow>('SELECT * FROM audit_log WHERE release_hold_id = ANY($1)', [foreignHoldIds])).rows
-      : []
+    const foreign = await snapshotForeignRows(playbookIds, mine)
 
     try {
       // One hold that CITES the corpus — the only kind the foreign key forces out — and one that
@@ -647,61 +786,114 @@ describe.skipIf(!LIVE)('CockroachDB memory layer', () => {
         expect.objectContaining({ actor: 'agent', action: 'hold' }),
       ])
     } finally {
-      // Restore in FK order: arcs, then the holds that cite them, then their advisories and audit
-      // rows. Ids are preserved so anything that cited a restored row — `npm run explain -- --hold
-      // <uuid>` in DEMO.md, for one — still resolves.
-      //
-      // Every insert is ON CONFLICT DO NOTHING because the clear is deliberately PARTIAL: only
-      // holds that cite the corpus are forced out by the foreign key, so a pre-existing hold that
-      // cites nothing is still sitting there, untouched, along with its advisory and audit rows.
-      // Restoring unconditionally would collide with the rows that never left. Which is the same
-      // asymmetry the test asserts one screen up — worth having the cleanup agree with it.
-      for (const a of foreignArcs.rows) {
-        await query(
-          `INSERT INTO takeover_playbook
-             (id, package_id, label, source, held_out, arc_summary, embedding, embedding_model, embedding_dims)
-           VALUES ($1, $2, $3, $4, $5, $6, $7::VECTOR, $8, $9)
-           ON CONFLICT (id) DO NOTHING`,
-          [a.id, a.package_id, a.label, a.source, a.held_out, a.arc_summary, a.embedding, a.embedding_model, a.embedding_dims],
-        )
-      }
-      for (const h of foreignHolds.rows) {
-        await query(
-          `INSERT INTO release_hold
-             (id, package_id, release_version, reason, matched_playbook_id, similarity, created_at,
-              resolution, resolved_by, resolved_at, resolution_note)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-           ON CONFLICT (id) DO NOTHING`,
-          [h.id, h.package_id, h.release_version, h.reason, h.matched_playbook_id, h.similarity,
-           h.created_at, h.resolution, h.resolved_by, h.resolved_at, h.resolution_note],
-        )
-      }
-      for (const d of foreignAdvisories) {
-        await query(
-          `INSERT INTO distro_advisory_outbox (id, release_hold_id, advisory_text, sent, created_at)
-           VALUES ($1, $2, $3, $4, $5)
-           ON CONFLICT (id) DO NOTHING`,
-          [d.id, d.release_hold_id, d.advisory_text, d.sent, d.created_at],
-        )
-      }
-      for (const l of foreignAudit) {
-        await query(
-          `INSERT INTO audit_log (id, release_hold_id, actor, action, detail, created_at)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           ON CONFLICT (id) DO NOTHING`,
-          [l.id, l.release_hold_id, l.actor, l.action, l.detail, l.created_at],
-        )
-      }
+      await restoreForeignRows(foreign)
     }
 
     // The restore is asserted, not assumed: a silent partial restore would leave the next person's
     // demo half-seeded and blame the seed script.
     const restored = await query<{ n: string }>('SELECT count(*) AS n FROM takeover_playbook')
-    expect(Number(restored.rows[0]!.n)).toBe(foreignArcs.rows.length)
+    expect(Number(restored.rows[0]!.n)).toBe(foreign.arcs.length)
     const holdsBack = await query<{ n: string }>(
       'SELECT count(*) AS n FROM release_hold WHERE NOT (package_id = ANY($1))',
       [mine],
     )
-    expect(Number(holdsBack.rows[0]!.n)).toBe(foreignHolds.rows.length)
+    expect(Number(holdsBack.rows[0]!.n)).toBe(foreign.holds.length)
+  })
+
+  /**
+   * The invariant `trust_state` exists to carry: a package is 'held' if and only if a hold is open
+   * on it.
+   *
+   * `clearPlaybook` broke it, and broke it on the routine path — `npm run seed` — because
+   * `trust_state` has no foreign key to `release_hold` and was written in exactly three places,
+   * none of them here. The observed result on the demo cluster was `trust_state` saying
+   * `xz-utils | held` with zero rows in `release_hold`, and `/api/state` answering
+   * `"trustStatus":"held","latestHold":null`: a package that claims to be held and can produce no
+   * hold to show for it. `resetPackage` already names that as the single most damaging state this
+   * UI can be in; the seed path was walking straight into it.
+   *
+   * Asserted as an invariant over the whole cluster rather than as an equality on one package,
+   * because the failure is not "this package has the wrong status" — it is "some package somewhere
+   * is lying about being held", and the next one to do it will not be xz-utils.
+   */
+  it('never leaves a package held with no open hold — after a clear, or at all', async () => {
+    // Two packages, because the interesting half is what must NOT change. `commitUnhold` already
+    // makes the trust status follow the REMAINING open holds rather than the one being resolved,
+    // and a clear has to reach the same answer by the same rule.
+    const arcText = 'A synthetic arc that exists only to be cited by the holds in this test.'
+    const foreign = await snapshotForeignRows([], [PKG, OTHER_PKG, ONLY_CITING, ALSO_UNCITED])
+
+    try {
+      const arcId = await insertPlaybookArc(
+        { packageId: `${PKG}-clear-arc`, label: 'takeover', source: 'synthetic', heldOut: false, arcSummary: arcText },
+        offlineEmbed(arcText),
+      )
+      playbookIds.push(arcId)
+
+      // The package whose ONLY open hold cites the corpus: the clear takes its last justification
+      // away, so its status must follow.
+      await commitHold({
+        packageId: ONLY_CITING,
+        releaseVersion: '1.0.0',
+        reason: 'behavioural arc matches a known takeover shape',
+        matchedPlaybookId: arcId,
+        similarity: 0.88,
+        advisoryText: 'Hold 1.0.0 pending review.',
+        auditDetail: 'the only hold on this package, and it cites the corpus',
+      })
+      // The package that keeps a hold the foreign key does not touch: it is still legitimately held
+      // after the clear, and resetting it would be its own kind of lie.
+      await commitHold({
+        packageId: ALSO_UNCITED,
+        releaseVersion: '2.0.0',
+        reason: 'behavioural arc matches a known takeover shape',
+        matchedPlaybookId: arcId,
+        similarity: 0.84,
+        advisoryText: 'Hold 2.0.0 pending review.',
+        auditDetail: 'cites the corpus and will be deleted',
+      })
+      await commitHold({
+        packageId: ALSO_UNCITED,
+        releaseVersion: '2.0.1',
+        reason: 'held on signals alone, with no matching playbook arc',
+        matchedPlaybookId: null,
+        similarity: 0.41,
+        advisoryText: 'Hold 2.0.1 pending review.',
+        auditDetail: 'cites nothing, so it survives the clear and keeps the package held',
+      })
+
+      const statusOf = async (pkg: string): Promise<string | null> => {
+        const r = await query<{ status: string }>('SELECT status FROM trust_state WHERE package_id = $1', [pkg])
+        return r.rows[0]?.status ?? null
+      }
+      const openHolds = async (pkg: string): Promise<number> => {
+        const r = await query<{ n: string }>(
+          'SELECT count(*) AS n FROM release_hold WHERE package_id = $1 AND resolution IS NULL',
+          [pkg],
+        )
+        return Number(r.rows[0]!.n)
+      }
+
+      expect(await statusOf(ONLY_CITING)).toBe('held')
+      expect(await statusOf(ALSO_UNCITED)).toBe('held')
+
+      await clearPlaybook({ force: true })
+
+      // Its hold is gone, so the claim goes with it. 'trusted' rather than 'cleared': nobody
+      // reviewed anything, the evidence was deleted by a reseed — the same wording `resetPackage`
+      // uses for the same reason.
+      expect(await openHolds(ONLY_CITING)).toBe(0)
+      expect(await statusOf(ONLY_CITING)).toBe('trusted')
+
+      // One hold survived, so the package is still held — and still able to show why.
+      expect(await openHolds(ALSO_UNCITED)).toBe(1)
+      expect(await statusOf(ALSO_UNCITED)).toBe('held')
+
+      expect(await orphanedHeldPackages()).toEqual([])
+    } finally {
+      await restoreForeignRows(foreign)
+      await resetPackage(ONLY_CITING)
+      await resetPackage(ALSO_UNCITED)
+    }
   })
 })

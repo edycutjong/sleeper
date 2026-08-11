@@ -119,12 +119,34 @@ export function mcpHeaders(input: { apiKey: string; clusterId?: string | null })
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
+ * Characters that continue an identifier. `$` is one of them, which is the whole reason the
+ * dollar-quote rule below needs a left boundary: `SELECT 1 AS a$$` is a column aliased `a$$`, not
+ * an alias followed by an opening dollar quote. Verified on the cluster — and it matters, because
+ * `SELECT 1 AS a$$ ; SELECT 2` runs BOTH statements there. A scanner that opened a dollar quote at
+ * that `$$` would blank the `;` and hand the pair through as one statement: the same fail-open bug
+ * this scanner is being taught to avoid, just wearing a different hat.
+ */
+const IDENT_CHAR = /[A-Za-z0-9_$]/
+
+/** `$$` or `$tag$`, anchored. `$1` is a placeholder, not a tag, so the trailing `$` is required. */
+const DOLLAR_TAG = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/
+
+/**
+ * The redacted copy, plus what the scanner was still inside when the input ran out.
+ *
+ * `unterminated` is not a diagnostic nicety. An unclosed quote is exactly the state in which the
+ * scanner blanks the entire rest of the input — including a `;` that CockroachDB honours — so it
+ * is the one residual way this file can still fail open, and `assertSingleStatement` refuses it.
+ */
+type SqlScan = { redacted: string; unterminated: string | null }
+
+/**
  * Blanks the *contents* of string literals, quoted identifiers and comments, keeping every
  * delimiter, every newline and the original length — so an offset into the result is an offset
  * into the input, and only actual SQL code is left to match against.
  *
- * Every lexical check in this file runs on the output of this scanner rather than on raw SQL,
- * because both of them were wrong without it and in opposite-looking ways:
+ * Every lexical check in this file runs on this scanner's output rather than on raw SQL, because
+ * both of them were wrong without it and in opposite-looking ways:
  *
  *   - `splitStatements` must not see a `;` inside `WHERE detail = 'held; queued'` as a boundary,
  *   - `hasExplicitLimit` must not see the *characters* "limit 25" inside
@@ -134,15 +156,35 @@ export function mcpHeaders(input: { apiKey: string; clusterId?: string | null })
  *
  * `''` inside a literal needs no special case: the scanner toggles out on the first quote and
  * back in on the second, which lands in the same state with the same length.
+ *
+ * Modelling *only* `'…'`, `"…"`, `--` and `/*` was not a cosmetic gap. CockroachDB also has
+ * dollar-quoted strings, backslash-escaped E-strings and NESTED block comments, and an unmodelled
+ * quote form puts this scanner into a string state the real lexer is not in — or the reverse —
+ * after which every `;` and every `LIMIT` is read wrong. `$$'$$` was the proof: one dollar-quoted
+ * apostrophe read as an unclosed literal blanked the rest of the input, and
+ * `SELECT 1 LIMIT 1 || $$'$$; DROP TABLE audit_log` came back from `assertSingleStatement` as ONE
+ * statement while the cluster ran both halves.
+ *
+ * Each rule below was checked against a live CockroachDB before being written, and the comment on
+ * it says what was observed rather than what the docs imply — the previous version of this scanner
+ * was broken by execution, not by inspection, so inspection is not what it is defended with.
+ *
+ * Honest about the remaining edge: where this scanner and the real lexer could still disagree, it
+ * is arranged to disagree in the direction that over-splits (a loud rejection) rather than
+ * over-swallows (a silent pass), and `assertSingleStatement` refuses anything left unterminated.
  */
-function redactNonCode(sql: string): string {
+function scanSql(sql: string): SqlScan {
   const out: string[] = []
-  let inSingle = false
-  let inDouble = false
   let inLineComment = false
-  let inBlockComment = false
+  /** A counter, not a flag: CockroachDB nests block comments (verified). */
+  let blockDepth = 0
+  /** The open quote-like construct, or null. `escapes` is true only for an E-string. */
+  let quote: { close: string; escapes: boolean; label: string } | null = null
 
   const blank = (ch: string): string => (ch === '\n' ? '\n' : ' ')
+  const keep = (text: string): void => {
+    for (const ch of text) out.push(ch)
+  }
 
   for (let i = 0; i < sql.length; i++) {
     const ch = sql[i]!
@@ -153,42 +195,106 @@ function redactNonCode(sql: string): string {
       out.push(blank(ch))
       continue
     }
-    if (inBlockComment) {
+
+    if (blockDepth > 0) {
+      // `/*` is tested before `*/`, which is what CockroachDB does: `/*/*/` is an *unterminated*
+      // comment there (the inner `/*` opens rather than the outer `*/` closing), while
+      // `/*/ x */` is a complete one. Both verified. Leaving at the first `*/` — what this used to
+      // do — meant `/* outer /* inner */ LIMIT 1 */` handed back a LIMIT that bounds nothing.
+      if (ch === '/' && next === '*') {
+        blockDepth++
+        keep('/*')
+        i++
+        continue
+      }
       if (ch === '*' && next === '/') {
-        inBlockComment = false
-        out.push('*', '/')
+        blockDepth--
+        keep('*/')
         i++
         continue
       }
       out.push(blank(ch))
       continue
     }
-    if (!inSingle && !inDouble && ch === '-' && next === '-') {
+
+    if (quote) {
+      if (quote.escapes && ch === '\\') {
+        // Consume the escape and whatever it escapes, so `e'it\'s'` does not end at that quote.
+        out.push(' ')
+        if (i + 1 < sql.length) {
+          out.push(blank(sql[i + 1]!))
+          i++
+        }
+        continue
+      }
+      if (sql.startsWith(quote.close, i)) {
+        keep(quote.close)
+        i += quote.close.length - 1
+        quote = null
+        continue
+      }
+      out.push(blank(ch))
+      continue
+    }
+
+    if (ch === '-' && next === '-') {
       inLineComment = true
-      out.push('-', '-')
+      keep('--')
       i++
       continue
     }
-    if (!inSingle && !inDouble && ch === '/' && next === '*') {
-      inBlockComment = true
-      out.push('/', '*')
+    if (ch === '/' && next === '*') {
+      blockDepth = 1
+      keep('/*')
       i++
       continue
     }
-    if (ch === "'" && !inDouble) {
-      inSingle = !inSingle
+    if (ch === "'") {
+      // `e'…'` honours backslash escapes; a plain `'…'` does not — CockroachDB runs with
+      // standard_conforming_strings on, so `SELECT 'a\'` yields `a\` and that quote really does
+      // close (verified). The `e` must be its own token: reading `abcE'x'` as an E-string would
+      // run the scanner past a closing quote that the lexer honours, which is the fail-open
+      // direction. Missing a real E-string only over-splits, which is loud.
+      const prev = sql[i - 1]
+      const beforePrev = sql[i - 2]
+      const isEString =
+        (prev === 'e' || prev === 'E') && !(beforePrev !== undefined && IDENT_CHAR.test(beforePrev))
+      quote = {
+        close: "'",
+        escapes: isEString,
+        label: isEString ? "an E-string (e'…')" : "a string literal ('…')",
+      }
       out.push(ch)
       continue
     }
-    if (ch === '"' && !inSingle) {
-      inDouble = !inDouble
+    if (ch === '"') {
+      quote = { close: '"', escapes: false, label: 'a quoted identifier ("…")' }
       out.push(ch)
       continue
     }
-    out.push(inSingle || inDouble ? blank(ch) : ch)
+    if (ch === '$') {
+      const prev = sql[i - 1]
+      const tag =
+        prev !== undefined && IDENT_CHAR.test(prev) ? undefined : DOLLAR_TAG.exec(sql.slice(i))?.[0]
+      if (tag) {
+        quote = { close: tag, escapes: false, label: `a dollar-quoted string (${tag}…${tag})` }
+        keep(tag)
+        i += tag.length - 1
+        continue
+      }
+    }
+    out.push(ch)
   }
 
-  return out.join('')
+  return {
+    redacted: out.join(''),
+    unterminated: quote ? quote.label : blockDepth > 0 ? 'a block comment (/*…*/)' : null,
+  }
+}
+
+/** The redacted copy alone, for the checks that match against code and ignore termination. */
+function redactNonCode(sql: string): string {
+  return scanSql(sql).redacted
 }
 
 /**
@@ -231,6 +337,20 @@ function isOnlyComment(statement: string): boolean {
  * hope about the caller.
  */
 export function assertSingleStatement(sql: string): string {
+  // An unclosed quote is the one state in which the scanner blanks everything after it, so a `;`
+  // the server would honour stops looking like a boundary. Refusing it costs nothing real:
+  // CockroachDB rejects an unterminated string or comment as a lexical error anyway, so no
+  // statement that would have run is being turned away — but a payload that relies on the
+  // scanner's blind spot is, before it can be counted as one statement.
+  const { unterminated } = scanSql(sql)
+  if (unterminated) {
+    throw new McpLimitError(
+      `SQL ends inside ${unterminated} that is never closed. CockroachDB would reject this as a ` +
+        `lexical error; it is refused here because an unclosed quote also hides every later ';' ` +
+        `from the one-statement check.`,
+    )
+  }
+
   const statements = splitStatements(sql)
   if (statements.length === 0) {
     throw new McpLimitError('MCP tool call carries no SQL statement.')
@@ -268,6 +388,27 @@ export function assertSingleStatement(sql: string): string {
  */
 export function hasExplicitLimit(sql: string): boolean {
   return /\blimit\s+\d+/i.test(redactNonCode(sql))
+}
+
+/**
+ * True when the statement *ends* in a literal LIMIT — a clause in the tail position, not the
+ * characters "limit 25" somewhere in the text.
+ *
+ * This is the belt to `hasExplicitLimit`'s braces, and it is deliberately not built on the same
+ * assumption. `hasExplicitLimit` is only as good as the scanner: every bypass this file has ever
+ * had was a construct the scanner did not model, and the honest position is that there may be
+ * another one. A positional check does not care. Text buried in a literal, a comment or a
+ * dollar-quoted body is by definition not the last clause of the statement, so it cannot satisfy
+ * this no matter how badly the lexer is fooled — the payload would have to put a real, working
+ * LIMIT at the end, at which point the statement genuinely is bounded and the guard has done its
+ * job rather than been evaded.
+ *
+ * Narrow on purpose, and it can refuse valid SQL: a trailing comment (`… LIMIT 1 -- note`) or a
+ * clause after the LIMIT reads as unbounded here. That is the safe direction — loud refusal, not
+ * a silently truncated evidence trail — and every statement in `EVIDENCE_SQL` ends in its LIMIT.
+ */
+export function hasTrailingLimit(sql: string): boolean {
+  return /\blimit\s+\d+(\s+offset\s+\d+)?\s*$/i.test(redactNonCode(sql))
 }
 
 /** A UUID coming from a URL or an argv gets inlined into SQL — so it is validated, not trusted. */
@@ -669,6 +810,19 @@ export class CockroachMcpClient implements SqlReader {
           `Add a LIMIT so a truncated evidence trail cannot look like a complete one.`,
       )
     }
+    // Two checks for one property, on purpose. The one above asks whether a LIMIT appears in the
+    // code; this one asks whether the statement ENDS in one. The first depends on the scanner
+    // being right about every quote form CockroachDB has, and the history of this file is a list
+    // of forms it was wrong about. The second does not depend on the scanner at all: whatever a
+    // literal contains, it is not the tail of the statement.
+    if (!hasTrailingLimit(statement)) {
+      throw new McpLimitError(
+        `select_query must END in a literal LIMIT (optionally followed by OFFSET), and this one does not: ` +
+          `${JSON.stringify(statement.slice(-60))}. A LIMIT that is not the last clause is not a bound the ` +
+          `server will honour ahead of its implicit ${MCP_IMPLICIT_SELECT_LIMIT}, and text that merely looks ` +
+          `like one — inside a literal, a comment or a dollar-quoted body — is not a bound at all.`,
+      )
+    }
     return this.call(MCP_TOOLS.select, { sql: statement })
   }
 
@@ -766,12 +920,23 @@ export async function resolveSqlReader(
   )
   try {
     await client.connect()
+    // The read-only gate belongs on the path that actually runs, not only in the audit script.
+    // `assertReadOnlyTools` existed so the README's "read-only at the protocol layer" claim would
+    // be a property rather than a sentence, but `npm run mcp:audit` was the only caller — so
+    // `npm run explain`, GET /api/explain and GET /api/hold/:id would happily hand a distro
+    // packager evidence labelled read-only over a session advertising `insert_rows`.
+    //
+    // It throws inside the try deliberately: a write-capable session then becomes the same loud,
+    // reasoned fallback to direct SQL as an auth failure, with the reason naming the tools. That
+    // is the right trade here — the packager still gets the evidence, over a transport that is
+    // read-only because it is our own SELECT-only pool, and the label stops being a lie.
+    assertReadOnlyTools(client.availableTools())
     return client
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     await client.close().catch(() => {})
     return directReaderFactory(
-      `MCP was configured but the session could not be established (${message}) — fell back to direct SQL`,
+      `MCP was configured but the session was not usable (${message}) — fell back to direct SQL`,
     )
   }
 }

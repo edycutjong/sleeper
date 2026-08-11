@@ -13,6 +13,7 @@
     "calibrate": "tsx scripts/calibrate.ts",
     "replay": "tsx scripts/replay.ts",
     "explain": "tsx scripts/explain.ts",
+    "unhold": "tsx scripts/unhold.ts",
     "mcp:audit": "tsx scripts/mcp-audit.ts",
     "provision": "./scripts/provision.sh",
     "bench": "tsx scripts/bench.ts",

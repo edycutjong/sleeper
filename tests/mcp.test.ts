@@ -24,6 +24,7 @@ import {
   assertSingleStatement,
   assertUuid,
   hasExplicitLimit,
+  hasTrailingLimit,
   writeCapableTools,
   mcpHeaders,
   parseRows,
@@ -211,6 +212,129 @@ describe('statement limits — one statement per call, ≤16,384 chars', () => {
     await expect(
       client.select(`SELECT detail FROM audit_log WHERE detail = 'limit 25 exceeded'`),
     ).rejects.toThrow(McpLimitError)
+    expect(server.sent).toHaveLength(0)
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // The rest of CockroachDB's lexer.
+  //
+  // Everything below was broken by *execution*, not by reading the code: each construct here was
+  // run against a live CockroachDB first, and the guard was then held to what the cluster does.
+  // The shape of the bug was always the same — a quote form the scanner did not model puts it in
+  // a string state the real lexer is not in, and from that character on every `;` and every
+  // `LIMIT` is read wrong.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  // The one that broke the central guarantee. `$$'$$` is a dollar-quoted string containing an
+  // apostrophe; a scanner that models `'…'` but not `$$…$$` reads that apostrophe as opening a
+  // literal which never closes, blanks the rest of the input, and reports two statements as one.
+  // Verified on a live cluster: CockroachDB runs BOTH halves of this.
+  it('does not let a dollar-quoted apostrophe hide a second statement', () => {
+    expect(() => assertSingleStatement("SELECT 1 LIMIT 1 || $$'$$; DROP TABLE audit_log")).toThrow(
+      McpLimitError,
+    )
+    expect(splitStatements(`SELECT 'x' || $$'$$ AS a LIMIT 1; DROP TABLE audit_log`)).toHaveLength(2)
+  })
+
+  // `$` continues an identifier, so `SELECT 1 AS a$$` aliases a column `a$$` and does NOT open a
+  // dollar quote — verified: `SELECT 1 AS a$$ ; SELECT 2` runs both statements on the cluster.
+  // A dollar-quote rule without that left boundary would blank the `;` and recreate the very bug
+  // it was added to fix, which is why the boundary is tested rather than assumed.
+  it('does not read a $ that merely continues an identifier as a dollar quote', () => {
+    expect(splitStatements('SELECT 1 AS a$$ ; SELECT 2')).toHaveLength(2)
+    expect(splitStatements('SELECT 1 AS a$$b$$ LIMIT 1; DROP TABLE events')).toHaveLength(2)
+  })
+
+  // The same root cause pointing the other way: a legal single statement refused. Loud rather than
+  // dangerous, but still wrong, and the fix has to close both directions or it is half a fix.
+  it('does not split a legal statement on a semicolon inside a dollar-quoted body', () => {
+    const sql = 'SELECT $$a;b$$ LIMIT 1'
+    expect(splitStatements(sql)).toEqual([sql])
+    expect(assertSingleStatement(sql)).toBe(sql)
+    expect(splitStatements('SELECT $t$ ; $$ ; $t$ AS z LIMIT 1')).toHaveLength(1)
+  })
+
+  // Four ways to report a bound that does not exist. Each is a construct whose *body* contains the
+  // characters "limit N"; the body is data, the statement is unbounded, and counting it as bounded
+  // is what hands a distro packager 25 rows of a 1,000-row audit trail as the whole story.
+  it('does not count a LIMIT inside a dollar-quoted body as a bound', () => {
+    expect(hasExplicitLimit('SELECT detail FROM audit_log WHERE detail = $$limit 25$$')).toBe(false)
+    expect(hasExplicitLimit('SELECT detail FROM audit_log WHERE detail = $tag$ limit 999 $tag$')).toBe(
+      false,
+    )
+  })
+
+  // `e'…'` honours backslash escapes, so `\'` does not close the string — the literal runs on and
+  // swallows the "limit 25" that follows. Verified: `SELECT e'it\'s limit 25 exceeded'` returns the
+  // single value `it's limit 25 exceeded`.
+  it('does not count a LIMIT inside a backslash-escaped E-string as a bound', () => {
+    expect(hasExplicitLimit(`SELECT detail FROM audit_log WHERE detail = e'it\\'s limit 25 exceeded'`)).toBe(
+      false,
+    )
+    expect(hasExplicitLimit(`SELECT detail FROM audit_log WHERE detail = E'it\\'s limit 25 exceeded'`)).toBe(
+      false,
+    )
+  })
+
+  // A plain `'…'` is NOT an E-string: CockroachDB runs with standard_conforming_strings on, so
+  // `SELECT 'a\'` yields `a\` and that quote really does close. Honouring backslash everywhere
+  // would run the scanner past a closing quote the lexer respects — the fail-open direction — so
+  // this pins the asymmetry rather than leaving it to chance.
+  it('keeps a backslash literal in a plain string, where it does not escape the closing quote', () => {
+    expect(splitStatements(`SELECT 'a\\' AS z LIMIT 1; DROP TABLE events`)).toHaveLength(2)
+  })
+
+  // CockroachDB nests block comments — verified: `SELECT 1 /* /* nested */ still comment */`
+  // returns 1, and `/*/*/` is an *unterminated* comment there. Leaving the comment at the first
+  // `*/` handed back a LIMIT that is commented out and bounds nothing.
+  it('does not count a LIMIT inside a nested block comment as a bound', () => {
+    expect(hasExplicitLimit('SELECT detail FROM audit_log /* outer /* inner */ LIMIT 1 */')).toBe(false)
+    expect(splitStatements('SELECT 1 /* a /* b */ ; SELECT 2 */ LIMIT 1')).toHaveLength(1)
+  })
+
+  // An unclosed quote is the one remaining state in which the scanner blanks everything after it,
+  // so a `;` the server would honour stops looking like a boundary. Refusing it turns away nothing
+  // real: CockroachDB rejects an unterminated string or comment as a lexical error anyway.
+  it('refuses SQL that ends inside an unclosed quote or comment', () => {
+    expect(() => assertSingleStatement('SELECT 1 LIMIT 1 || $$ ; DROP TABLE audit_log')).toThrow(
+      /never closed/,
+    )
+    expect(() => assertSingleStatement(`SELECT 'a ; DROP TABLE audit_log`)).toThrow(McpLimitError)
+    expect(() => assertSingleStatement('SELECT 1 /* x ; DROP TABLE audit_log')).toThrow(McpLimitError)
+    expect(() => assertSingleStatement('SELECT 1 /*/*/ ; DROP TABLE audit_log')).toThrow(McpLimitError)
+  })
+
+  // Defence that does not depend on the lexer being perfect. Every bypass this file has ever had
+  // was a construct the scanner did not model, and the honest position is that there may be
+  // another one — but text buried in a literal is not the tail of the statement, so it cannot
+  // satisfy a positional check no matter how badly the lexer is fooled.
+  it('requires a LIMIT in the tail position, which buried text can never occupy', () => {
+    expect(hasTrailingLimit('SELECT 1 LIMIT 5')).toBe(true)
+    expect(hasTrailingLimit('SELECT 1 limit 5\n')).toBe(true)
+    expect(hasTrailingLimit('SELECT 1 LIMIT 5 OFFSET 2')).toBe(true)
+    expect(hasTrailingLimit('SELECT 1 LIMIT ALL')).toBe(false)
+    expect(hasTrailingLimit('SELECT $$limit 5$$ FROM t')).toBe(false)
+    // Refuses valid SQL, and says so out loud rather than guessing — the safe direction.
+    expect(hasTrailingLimit('SELECT 1 LIMIT 5 -- note')).toBe(false)
+  })
+
+  it('sends none of the four bypass payloads, because select_query gates on both checks', async () => {
+    const bypasses = [
+      'SELECT detail FROM audit_log WHERE detail = $$limit 25$$',
+      'SELECT detail FROM audit_log WHERE detail = $tag$ limit 999 $tag$',
+      `SELECT detail FROM audit_log WHERE detail = e'it\\'s limit 25 exceeded'`,
+      'SELECT detail FROM audit_log /* outer /* inner */ LIMIT 1 */',
+    ]
+    const { client, server } = await connected()
+    for (const sql of bypasses) await expect(client.select(sql)).rejects.toThrow(McpLimitError)
+    expect(server.sent).toHaveLength(0)
+  })
+
+  it('refuses a SELECT whose LIMIT is real but not the last clause, naming the tail it saw', async () => {
+    const { client, server } = await connected()
+    await expect(client.select('SELECT detail FROM audit_log LIMIT 5 -- but not really')).rejects.toThrow(
+      /must END in a literal LIMIT/,
+    )
     expect(server.sent).toHaveLength(0)
   })
 })
@@ -605,6 +729,40 @@ describe('resolveSqlReader — the fallback is explicit, never silent', () => {
     expect(reader.via).toBe('direct')
     expect(reader.reason).toContain('401 Unauthorized')
     expect(reader.reason).toContain('fell back to direct SQL')
+  })
+
+  // `assertReadOnlyTools` existed so the README's "read-only at the protocol layer" claim would be
+  // a property rather than a sentence — but `npm run mcp:audit` was its only caller, and the audit
+  // script is not the runtime path. `npm run explain`, GET /api/explain and GET /api/hold/:id all
+  // arrive here, and all three used to hand a distro packager evidence labelled read-only over a
+  // session advertising `insert_rows`. The gate is on this path now, so the label is earned.
+  it('refuses to label a write-capable session read-only, and falls back naming the tool', async () => {
+    const server = fakeServer({
+      tools: [...SERVER_TOOLS, toolDef('insert_rows', { table: {}, rows: {} }, ['table', 'rows'])],
+    })
+    const reader = await resolveSqlReader(
+      directReader,
+      { COCKROACH_MCP_API_KEY: 'sk', COCKROACH_CLUSTER_ID: 'cl-1' },
+      async () => server.client,
+    )
+    expect(reader.via).toBe('direct')
+    expect(reader.reason).toContain('insert_rows')
+    expect(reader.reason).toContain('SLEEPER_MCP_ROLE')
+    expect(reader.reason).toContain('fell back to direct SQL')
+    // The rejected session is closed rather than left dangling on a transport nobody will read.
+    expect(server.isClosed()).toBe(true)
+  })
+
+  // The mirror of the test above: the gate must not cost the MCP path its normal case.
+  it('still returns the MCP reader when every advertised tool is read-shaped', async () => {
+    const server = fakeServer()
+    const reader = await resolveSqlReader(
+      directReader,
+      { COCKROACH_MCP_API_KEY: 'sk' },
+      async () => server.client,
+    )
+    expect(reader.via).toBe('mcp')
+    expect(server.isClosed()).toBe(false)
   })
 })
 

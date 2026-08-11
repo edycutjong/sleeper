@@ -342,25 +342,54 @@ export async function upsertActorArc(
  * The hint pins WHICH index is used. It does not manufacture the `prefix spans` line — that comes
  * from the index's own leading column being `=`-constrained, and would be absent if the query
  * failed to constrain `package_id`.
+ *
+ * The `embedding_model` filter sits OUTSIDE the ANN scan, and the shape is forced rather than
+ * chosen. `events` stores which model wrote every vector (sql/schema.sql) but the vector index's
+ * only prefix column is `package_id`, and CockroachDB refuses a hinted vector-index query that
+ * carries any other predicate — `AND embedding_model = $4` inside the scan fails outright with
+ * `index "events_pkg_embedding_idx" cannot be used for this query` (SQLSTATE 42809). Dropping the
+ * hint to make it legal is worse: the optimizer then abandons the vector index altogether and
+ * scans `events_pkg_time_idx`, so both the `vector search` node and the `prefix spans` line — the
+ * two things the demo puts on camera — disappear. Filtering the top-k on the way out keeps the
+ * plan intact (verified: `vector search` + `prefix spans: [/'xz-utils' - /'xz-utils']`).
+ *
+ * Honest about what that buys and what it does not. It buys the guarantee the README claims: a
+ * vector written by a different embedding model can no longer be RETURNED as a neighbour, so
+ * `/api/explain` cannot render a cosine distance between two unrelated embedding spaces to a judge
+ * as retrieval evidence. It does not buy pre-filtering. Unlike `takeover_playbook`, where the
+ * model id is an index prefix column and other-model rows are never descended into, here they
+ * still consume top-k slots and are discarded afterwards — on a genuinely mixed corpus this panel
+ * shrinks rather than lies. Closing that gap means putting `embedding_model` into the index
+ * prefix, which is a change to sql/schema.sql and to nothing in this file.
  */
-export const SCOPED_NEIGHBOUR_SQL = `SELECT id, actor_id, kind, content, occurred_at, source_url,
-       embedding <=> $2::VECTOR AS distance
-FROM events@events_pkg_embedding_idx
-WHERE package_id = $1
-ORDER BY embedding <=> $2::VECTOR
-LIMIT $3`
+export const SCOPED_NEIGHBOUR_SQL = `SELECT id, actor_id, kind, content, occurred_at, source_url, distance
+FROM (
+  SELECT id, actor_id, kind, content, occurred_at, source_url, embedding_model,
+         embedding <=> $2::VECTOR AS distance
+  FROM events@events_pkg_embedding_idx
+  WHERE package_id = $1
+  ORDER BY embedding <=> $2::VECTOR
+  LIMIT $3
+)
+WHERE embedding_model = $4
+ORDER BY distance`
 
 export type ScopedNeighbour = StoredEvent & { similarity: number }
 
 /**
  * Prefix-scoped ANN search: the vector index's leading column is `package_id`, so the scan is
  * pre-filtered to one package's own history instead of walking every package in the cluster.
+ *
+ * Neighbours are additionally restricted to vectors this process could have produced — see the
+ * comment on `SCOPED_NEIGHBOUR_SQL` for why that filter is a post-filter here and a prefix column
+ * on the playbook.
  */
 export async function scopedNeighbours(
   packageId: string,
   embedding: number[],
   limit = 20,
 ): Promise<ScopedNeighbour[]> {
+  const { model } = embeddingProvenance()
   const result = await query<{
     id: string
     actor_id: string
@@ -369,7 +398,7 @@ export async function scopedNeighbours(
     occurred_at: Date
     source_url: string | null
     distance: string
-  }>(SCOPED_NEIGHBOUR_SQL, [packageId, toVector(embedding), limit])
+  }>(SCOPED_NEIGHBOUR_SQL, [packageId, toVector(embedding), limit, model])
   return result.rows.map((r) => ({
     id: r.id,
     packageId,
@@ -399,10 +428,12 @@ export async function explainScoped(
   embedding: number[],
   limit = 20,
 ): Promise<ExplainResult> {
+  const { model } = embeddingProvenance()
   const result = await query<{ info: string }>(`EXPLAIN ${SCOPED_NEIGHBOUR_SQL}`, [
     packageId,
     toVector(embedding),
     limit,
+    model,
   ])
   const plan = result.rows.map((r) => r.info).join('\n')
   return {
@@ -424,6 +455,10 @@ export async function explainScoped(
  *    prefix scoping is the `ORDER BY … <=> …` + `WHERE package_id = …` pair, which is intact.
  *  - the vector is rounded (see `vectorLiteral`), because full float precision is ~20 KB of text.
  *    EXPLAIN plans the query; it does not evaluate the distances.
+ *
+ * The `embedding_model` post-filter is carried over verbatim from `SCOPED_NEIGHBOUR_SQL`, subquery
+ * and all. A plan proved on a simpler statement than the one that runs is not a proof of anything,
+ * and this is the form a judge is shown over MCP.
  */
 export function scopedNeighbourExplainSql(
   packageId: string,
@@ -431,11 +466,16 @@ export function scopedNeighbourExplainSql(
   limit = 20,
   decimals = 6,
 ): string {
+  const { model } = embeddingProvenance()
   return `SELECT id, actor_id, kind, content, occurred_at, source_url
-FROM events@events_pkg_embedding_idx
-WHERE package_id = ${sqlLiteral(packageId)}
-ORDER BY embedding <=> ${sqlLiteral(vectorLiteral(embedding, decimals))}::VECTOR
-LIMIT ${Math.trunc(limit)}`
+FROM (
+  SELECT id, actor_id, kind, content, occurred_at, source_url, embedding_model
+  FROM events@events_pkg_embedding_idx
+  WHERE package_id = ${sqlLiteral(packageId)}
+  ORDER BY embedding <=> ${sqlLiteral(vectorLiteral(embedding, decimals))}::VECTOR
+  LIMIT ${Math.trunc(limit)}
+)
+WHERE embedding_model = ${sqlLiteral(model)}`
 }
 
 /**
@@ -709,6 +749,34 @@ export async function clearPlaybook(options: ClearPlaybookOptions = {}): Promise
       const scope = `(SELECT id FROM release_hold WHERE matched_playbook_id IS NOT NULL)`
       await client.query(`DELETE FROM audit_log WHERE release_hold_id IN ${scope}`)
       await client.query(`DELETE FROM distro_advisory_outbox WHERE release_hold_id IN ${scope}`)
+
+      // Deleting the holds is not the whole operation: `trust_state` is a separate table with no
+      // foreign key to `release_hold`, so a package whose only hold is about to vanish would be
+      // left claiming 'held' with nothing left to show for it. That is the exact state
+      // `resetPackage` was made transactional to avoid — a demo that opens on a held package and
+      // can produce no hold, no advisory and no audit row is worse than one that opens on a
+      // trusted package, because it looks like the paper trail was lost rather than never written.
+      //
+      // The condition mirrors `commitUnhold`: the trust status follows the REMAINING open holds,
+      // not this one operation. Every citing hold is about to go, so what survives is exactly the
+      // open holds that cite nothing — a package still covered by one of those stays 'held'.
+      // Scoped to packages this clear actually touches, so a reseed never rewrites the trust status
+      // of a package it has nothing to do with.
+      //
+      // Only 'held' is reset. A package sitting at 'cleared' has no open hold by definition, so it
+      // is not making a claim the deleted rows were the evidence for.
+      await client.query(
+        `UPDATE trust_state SET status = 'trusted', updated_at = now()
+          WHERE status = 'held'
+            AND package_id IN (
+              SELECT package_id FROM release_hold WHERE matched_playbook_id IS NOT NULL
+            )
+            AND package_id NOT IN (
+              SELECT package_id FROM release_hold
+               WHERE matched_playbook_id IS NULL AND resolution IS NULL
+            )`,
+      )
+
       await client.query('DELETE FROM release_hold WHERE matched_playbook_id IS NOT NULL')
     }
 

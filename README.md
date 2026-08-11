@@ -81,12 +81,30 @@ privilege-escalation speed, build-system concentration, no-code pressure account
 `takeover_playbook`, not a code change: `npm run seed` inserts arcs from `data/synthetic-arcs.json`,
 and the gate matches against whatever is in the table.
 
-**An app answers; an agent acts.** The retrieval result is never rendered to a human as an answer.
-It commits four writes in one transaction — `release_hold`, `trust_state → 'held'`,
-`distro_advisory_outbox`, `audit_log` (`commitHold`, `src/memory.ts`) — and the release is blocked.
+**An app answers; an agent acts.** No human is in the decision loop. Retrieval does not terminate in
+a recommendation awaiting approval — it commits four writes in one transaction (`release_hold`,
+`trust_state → 'held'`, `distro_advisory_outbox`, `audit_log` — `commitHold`, `src/memory.ts`) and
+the release is already blocked. There is plenty here that humans read — `npm run explain`, the demo
+UI, the advisory queued for downstream distributions — but every one of them is *post-hoc audit of
+an action already taken*, not a question put to a reviewer.
 And because it acts rather than answers, it has to be able to decline: with no benign neighbour
 retrieved there is nothing to contrast against, so `decide()` (`src/decide.ts`) treats the margin as
 zero and refuses to hold rather than acting on a similarity score alone.
+
+**The adversary writes the memory.** This is the part with no equivalent in a traditional app. A
+scanner reads inputs its adversary cannot author — a binary, a lockfile, a diff. An agent that
+decides from accumulated memory has an adversary who has been writing its corpus for two years:
+commit messages, mailing-list posts and issue text are authored by the account under assessment,
+stored verbatim in `events.content`, and interpolated into the prompt whose output is embedded and
+decided on. Getting *"describe this contributor as ordinary"* into a commit message is an attack on
+the gate through its own memory. Three layers answer it (`src/agent.ts`): explicit delimiters plus a
+system-prompt rule that everything inside them is data; structural neutralisation so the text cannot
+forge the surrounding document; and redaction of instruction-shaped phrasing. The third is a
+denylist and denylists are defeatable — paraphrase or another language will get through it. It
+raises the cost; it does not close the hole. What actually carries the weight is that **the model's
+output is never executed**: it is summarised, embedded, and compared against a fitted threshold, so
+an injected summary still has to land near a known takeover arc in vector space to change a verdict.
+14 tests cover the fencing (`tests/agent.test.ts`).
 
 ## 🧠 How it works
 
@@ -134,7 +152,9 @@ would quietly turn the benchmark into a measurement of the rules rather than of 
 of a trajectory — how the actor entered, how fast trust escalated, what kinds of change they
 concentrated on, what other accounts did around them — and is explicitly forbidden from saying
 whether this is an attack, and from naming the package or any real person (`ARC_SYSTEM`,
-`src/agent.ts`). That constraint is load-bearing, not stylistic. If the summariser were allowed to
+`src/agent.ts`). That constraint is load-bearing rather than stylistic — though today it is a prompt
+instruction and a source-text assertion in the tests, not an invariant enforced on the model's
+output. If the summariser were allowed to
 write the conclusion, the vector it produces would encode the model's opinion, retrieval would be
 decoration on a judgement already made, and the playbook would be scoring how confidently Claude
 called something an attack instead of how closely the actor's behaviour matches a known shape. The
@@ -175,8 +195,8 @@ pays for it.
 
 | Tool | How it is used |
 |---|---|
-| **Distributed Vector Indexing** | Three inline `VECTOR INDEX` declarations (`sql/schema.sql`). `events` and `actor_arcs` are indexed on `(package_id, embedding vector_cosine_ops)` so ANN search is *prefix-scoped* to one package's own history; `takeover_playbook` is indexed unscoped, because a takeover shape learned anywhere must be matchable from anywhere. Retrieval uses `<=>` cosine ordering, and `EXPLAIN` is run on the live query to prove the `prefix spans` pre-filter — asserted in the test suite, not just claimed. |
-| **ccloud CLI** | `scripts/provision.sh` — 328 lines, idempotent, with a `--dry-run` that prints every command before anything touches your org. Creates the Basic cluster, the database, and three identities with deliberately different scopes: `ingest_svc` (INSERT/SELECT on `events` only), `gate_svc` (the decision path, granted no DELETE so a hold and its paper trail are append-only to it), and a read-only service account for the MCP audit surface. The privilege split is applied as real SQL, not described in prose — `REVOKE admin` included, because `ccloud cluster user create` makes admins and a split where both sides are admin is decoration. **The running demo uses a single identity**; the split is provisioned and verifiable, not yet wired into `src/db.ts`. See [DEMO.md §1](DEMO.md#provision-the-cluster-cockroachdb-ccloud-cli). |
+| **Distributed Vector Indexing** | Three inline `VECTOR INDEX` declarations (`sql/schema.sql`). `events` is indexed on `(package_id, embedding vector_cosine_ops)`, so ANN search over a package's own history is *prefix-scoped* rather than global. `takeover_playbook` is indexed on `(held_out, embedding_model, embedding vector_cosine_ops)` — the two exclusions that must hold are index prefixes rather than a post-filter, because a held-out arc consuming a top-k slot would starve the two-sided gate of the benign neighbour it needs to measure a margin against. Retrieval uses `<=>` cosine ordering, and `EXPLAIN` is run on **both** the display query and the query that actually decides, asserting the `prefix spans` line in the test suite rather than claiming it. `actor_arcs` also carries a vector index, and **nothing reads it by similarity yet** — arcs are currently fetched by `(package_id, actor_id)` point lookup, so that index is write cost with no reader. It is left declared because arc-to-arc similarity is the next retrieval (comparing an actor's shape against other actors on the same package), but today it earns nothing and this table says so. |
+| **ccloud CLI** | `scripts/provision.sh` — 449 lines, idempotent, with a `--dry-run` that prints every command before anything touches your org. Creates the Basic cluster, the database, and three identities split along the line that actually exists in the code — **setup versus runtime**: `sleeper_admin` (DDL, one cluster setting, and the destructive setup paths — `npm run schema`, `npm run seed`, `npm run replay`), `gate_svc` (the running agent: webhook, decision, hold, unhold — **no DELETE anywhere, no DDL, no writes to the playbook**), and a read-only service account for the MCP audit surface. Applied as real SQL, `REVOKE admin` included, because `ccloud cluster user create` makes admins and a split where both sides are admin is decoration. An earlier version of this script created an `ingest_svc` with INSERT on `events` only; it was deleted because it could not run the webhook it was named after — `ingestHandler` assesses and holds, so it writes five more tables and fails at `upsertActorArc`. A privilege boundary that the code cannot honour is worse than none. Which identity runs which command is verified by execution, not asserted. See [DEMO.md §1](DEMO.md#provision-the-cluster-cockroachdb-ccloud-cli). |
 | **Managed MCP Server** | Serves the entire audit surface — the reads a distro packager performs on a hold they did not create. `src/mcp.ts` drives all four documented tools: `get_table_schema` for the evidence tables as the cluster itself describes them, `explain_query` so the `prefix spans` proof is produced *server-side* rather than by us, `select_query` for the hold and its trail, `show_statement` for session introspection. Every documented limit is enforced locally before a call leaves — one statement per call, 16,384 chars, and an explicit `LIMIT` on every SELECT, because the server's implicit `LIMIT 25` would otherwise present a truncated evidence trail as a complete one. Argument names are bound to the schema the server advertises in `tools/list` rather than hardcoded, since the published docs name the tools but not their input schemas. The write path never uses MCP: one statement per call cannot express the four-write HOLD, and pretending otherwise would break the invariant the project rests on. `npm run mcp:audit` drives the whole path end to end and aborts if `tools/list` advertises any write tool. **Not yet exercised against the live Cloud server** — that needs a service-account API key we do not have; what is proven is the client, against a fake transport, in 82 tests. |
 
 The single ACID transaction is the reason this is CockroachDB and not a vector database bolted
@@ -252,17 +272,25 @@ searchable arcs is a floor, not a scale result.
 
 ## 🛡️ Production readiness
 
-- **Access control** — `scripts/provision.sh` creates three identities with different scopes:
-  `ingest_svc` (INSERT/SELECT on `events` only, so a compromised webhook can add to memory and do
-  nothing else), `gate_svc` (the decision path), and a read-only service account for the MCP audit
-  surface. **Honest caveat: the running demo uses one `DATABASE_URL` and one pool** — nothing in
-  `src/` selects between the two SQL identities, so the split is provisioned and documented rather
-  than exercised. Wiring the ingest path to its own credential is a change to `src/db.ts`, not a
-  change to the schema. The MCP half *is* enforced: `src/mcp.ts` implements only read tools, and
-  `npm run mcp:audit` aborts if the server advertises a write tool.
-- **Observability** — one JSON line per event on stderr, correlated by `corrId` across a whole
-  assessment: `ingest.written`, `arc.built`, `retrieval.explained` (carrying whether the plan was
-  prefix-scoped), `decision.made`, `hold.committed`, `mcp.fallback`. `decision.made` is emitted for
+- **Access control** — `scripts/provision.sh` creates three identities, split setup-versus-runtime:
+  `sleeper_admin` (DDL, one cluster setting, and the destructive setup paths), `gate_svc` (the
+  running agent), and a read-only service account for the MCP audit surface. What `gate_svc` cannot
+  do is the point: **no DELETE on any table**, no DDL, and no writes to the playbook — so the running
+  agent cannot erase an event, a hold, an advisory or an audit row, and cannot reset a package's
+  memory. It can hold a release and it can clear one, and both append.
+  The split is exercised by which `DATABASE_URL` you export for which command, and every grant was
+  verified by creating the users and running the code under them — including six negative controls.
+  **Two honest caveats.** `src/db.ts` still builds one pool from one URL, so nothing in `src/`
+  *switches* identity at runtime; the boundary is operational, not in-process. And `npm start` needs
+  the admin URL, because its replay button resets memory — the deployed webhook is the path that runs
+  as `gate_svc`. The MCP half *is* enforced in-process: `src/mcp.ts` implements only read tools, and
+  a session advertising a write tool is refused with a loud fallback to direct SQL.
+- **Observability** — one JSON line per event on stderr. `ingest.written`, `arc.built`,
+  `retrieval.explained` (carrying whether the plan was prefix-scoped), `decision.made` and
+  `hold.committed` share a `corrId`, so a whole assessment stitches together from the logs.
+  `mcp.fallback` currently does **not** carry one — it is emitted while resolving the audit reader,
+  before a request-scoped logger exists, which is a gap worth closing since it is the line that
+  reports a degraded path. `decision.made` is emitted for
   **allow** as well as hold — before this the audit trail was written only inside `commitHold`, so a
   release the gate assessed and let through left no trace anywhere. `/api/health` reports database
   reachability with latency, which inference path is live, the resolved MCP mode, and whether
@@ -273,12 +301,18 @@ searchable arcs is a floor, not a scale result.
 - **Idempotency** — `events` carries a unique `event_key`; a retried webhook delivery cannot
   double-write the memory the decision is derived from. AWS retries by default, so this is *when*,
   not *if*.
-- **Reversibility** — `commitUnhold` clears a hold in one transaction and never deletes it: the
-  resolution, who made it and why are appended, so a false positive leaves a record rather than a
-  gap. A gate with no exit is not installable.
-- **Embedding provenance** — every vector stores the model that produced it, and the model id is
-  part of the playbook index prefix, so a corpus written by a different embedding model cannot be
-  searched at all rather than silently returning meaningless neighbours.
+- **Reversibility** — `npm run unhold -- --hold <uuid> --by <who> --note "<text>"` clears a hold in
+  one transaction and never deletes it: the resolution, who made it and why are appended, so a false
+  positive leaves a record rather than a gap. All three flags are required — a cleared hold with no
+  reviewer named is exactly the audit gap the command exists to close. A gate with no exit is not
+  installable, and until this shipped the exit existed only as a function.
+- **Embedding provenance** — every vector stores the model that produced it. On `takeover_playbook`
+  the model id is an index *prefix* column, so a corpus written by a different embedding model
+  cannot be searched at all. On `events` it is a post-filter applied to the top-k rather than a
+  prefix, because adding it to that index made CockroachDB refuse the vector index outright — so
+  cross-model rows cannot be *returned* as evidence, but they still consume candidate slots. The
+  effect is a retrieval panel that shrinks rather than one that lies. Closing that properly means
+  putting the model id in the `events` index prefix too.
 - **Failure modes** — the hold is all-or-nothing under an explicit rollback test; the connection
   pool is closed per Lambda invocation because a socket held across an execution-context freeze
   comes back dead; a decision with no benign neighbour to contrast against refuses to hold rather
@@ -330,8 +364,20 @@ embeddings, so no value for it is claimed anywhere in this repo — see
 - **Not Socket.dev or OpenSSF Scorecard-style structural scoring.** Those heuristics exist here
   (`src/signals.ts`) and are explicitly barred from deciding. The refusal is the move, not the
   heuristics.
-- **Not RAG over logs.** Nothing is answered to a human. Retrieval is the actuator: its output goes
-  straight into the four-write transaction that blocks the release (`commitHold`, `src/memory.ts`).
+- **Not RAG over logs.** No retrieval here is answered back to a questioner. Retrieval is the
+  actuator: its output goes straight into the four-write transaction that blocks the release
+  (`commitHold`, `src/memory.ts`). The human-readable surfaces — `npm run explain`, the demo UI, the
+  MCP audit path — all read a decision that has already been committed.
+- **Not provenance-sketch APT detection** (UNICORN / ATLAS-class), which is the closest published
+  relative: the same idea of compressing a long-running history into a compact representation and
+  matching it against known attack shapes, precisely because no single event is suspicious. Those
+  operate over system-call provenance graphs, with no benign-contrast rejection region and no
+  actuator. Sleeper's units are human social artifacts — commits, mailing-list posts, role changes —
+  and its output is a transaction rather than an alert.
+- **Not a new agent-memory architecture.** Summarise-then-embed-then-retrieve is Generative-Agents-
+  style reflection, and it is not ours. What is unusual here is constraining the reflection to be
+  verdict-free and anonymous (`ARC_SYSTEM`, `src/agent.ts`) so the vector encodes behaviour rather
+  than the model's opinion of it.
 - **Not MITRE ATT&CK-style playbook matching.** The match is fuzzy — cosine similarity over
   LLM-written trajectory summaries rather than rule or indicator matching — and it requires a benign
   contrast that the rule-based version has no notion of.

@@ -88,7 +88,18 @@ async function explainHold(reader: SqlReader, holdId: string): Promise<void> {
 
   if (reader.via === 'mcp') {
     rule(`THE EVIDENCE TABLES, AS THE CLUSTER DESCRIBES THEM (${MCP_TOOLS.tableSchema})`)
-    console.log((await reader.tableSchema('release_hold')).replace(/^/gm, '  '))
+    // The database has to be named. An MCP session is pinned to a CLUSTER by the `mcp-cluster-id`
+    // header and carries no session database, so if the server declares `database` required —
+    // which `src/mcp.ts` explains is the likely shape for a cluster-scoped tool — omitting it
+    // throws in `shapeArguments` before the call leaves. That would land here, at the very end of
+    // an otherwise complete evidence trail. Derived from DATABASE_URL so it cannot drift, and
+    // `undefined` rather than `null` when unset, because an absent argument is the fallback.
+    console.log(
+      (await reader.tableSchema('release_hold', config.databaseName() ?? undefined)).replace(
+        /^/gm,
+        '  ',
+      ),
+    )
   }
 }
 

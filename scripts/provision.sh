@@ -10,13 +10,25 @@
 #
 #   1. a Basic (free-tier) cluster                     — the memory engine
 #   2. a database                                      — everything in sql/schema.sql lands here
-#   3. TWO SQL identities with DIFFERENT privileges:
-#        ingest_svc — INSERT/SELECT on `events` only. The webhook path can add to memory and can
-#                     do nothing else: it cannot read the playbook, cannot hold a release, cannot
-#                     touch the audit log. A compromised ingest endpoint cannot clear a hold.
-#        gate_svc   — SELECT everywhere, plus INSERT/UPDATE on exactly the tables the atomic HOLD
-#                     writes. It is the only identity that can block a release, and it is granted
-#                     no DELETE anywhere, so a hold and its paper trail are append-only to it.
+#   3. TWO SQL identities, split along the line that actually exists in this codebase — SETUP
+#      versus RUNTIME, not "ingest" versus "gate":
+#        sleeper_admin — the operator's identity. DDL, one cluster setting, and the destructive
+#                        setup paths: `npm run schema`, `npm run seed` (DELETEs the playbook) and
+#                        `npm run replay` (starts with `resetPackage`, six DELETEs). Scoped to
+#                        THIS database plus exactly one system privilege — it is not a cluster
+#                        admin, cannot see another database and cannot create users.
+#        gate_svc      — the running agent: the deployed webhook, the decision, the hold, and the
+#                        unhold. SELECT everywhere, INSERT/UPDATE on the tables a decision writes,
+#                        and NO DELETE and no DDL anywhere. It can stop a release and it can clear
+#                        its own hold, but it cannot erase an event, a hold, an advisory or an
+#                        audit row, and it cannot reset a package's memory.
+#      There used to be an `ingest_svc` here holding INSERT/SELECT on `events` alone. It was
+#      removed because it was decorative: the webhook entry point it supposedly owned is
+#      `ingestHandler`, which calls `runReplay`, which rolls up an actor arc and can commit a
+#      hold — five more tables. Verified by running it: an events-only identity fails the first
+#      release-kind webhook with "does not have INSERT privilege on relation actor_arcs". A split
+#      that cannot run the path it is named after is worse than no split, because it reads as a
+#      security property while being a comment.
 #   4. optionally, a service account + API key for the Managed MCP Server — a THIRD identity,
 #      cluster-scoped and read-only, which is what `npm run explain` and `npm run mcp:audit`
 #      authenticate as.
@@ -185,7 +197,7 @@ step "3. Service identities"
 
 # `ccloud cluster user create` prints a generated password ONCE. It is deliberately not captured,
 # echoed to a file, or stored anywhere — copy it out of the terminal into .env.
-for user in ingest_svc gate_svc; do
+for user in sleeper_admin gate_svc; do
   info "SQL user '$user' — the generated password prints once; copy it now"
   run ccloud cluster user create "$CLUSTER" "$user" \
     || warn "'$user' already exists, or creation failed — continuing"
@@ -195,61 +207,150 @@ done
 # 4. The privilege split
 # ──────────────────────────────────────────────────────────────────────────────
 # `ccloud cluster user create` creates admins. Admin on both identities would make the "two
-# service identities with different privilege scopes" claim decorative, so the scopes are applied
-# here in SQL and the admin role is dropped from both. Run this AFTER `npm run schema`, since it
-# grants on tables.
+# identities with different privilege scopes" claim decorative, so the scopes are applied here in
+# SQL and the admin role is dropped from both — including from sleeper_admin, whose name describes
+# what it does for this project, not a role on the cluster.
+#
+# Two blobs, because they have different prerequisites and one is allowed to fail:
+#
+#   IDENTITY_SQL — connect/usage/create, plus the ONE system privilege `npm run schema` needs.
+#                  Applies to an empty database, so the first run of this script does useful work.
+#   TABLE_SQL    — the per-table split. Needs the tables, so it only lands after `npm run schema`.
+#                  Re-run this script then; it is idempotent.
+#
+# The exact grants below are not guesswork: every path in the "Next" block at the bottom was run
+# against a user holding precisely this set, and the DELETE/DDL statements gate_svc must never be
+# able to issue were run too, to confirm they are refused.
 step "4. Privilege scopes"
 
-GRANTS_SQL=$(cat <<SQL
--- ingest_svc: the webhook path. Adds to memory, and can do nothing else.
-REVOKE admin FROM ingest_svc;
-GRANT CONNECT ON DATABASE ${DATABASE} TO ingest_svc;
-GRANT USAGE ON SCHEMA public TO ingest_svc;
-GRANT INSERT, SELECT ON TABLE events TO ingest_svc;
+IDENTITY_SQL=$(cat <<SQL
+-- sleeper_admin: the operator. Owns the schema, and is the only identity that may destroy data.
+REVOKE admin FROM sleeper_admin;
+GRANT CONNECT, CREATE ON DATABASE ${DATABASE} TO sleeper_admin;
+GRANT ALL ON SCHEMA public TO sleeper_admin;
 
--- gate_svc: the decision path. Reads everything, writes only what a HOLD writes, deletes nothing.
+-- gate_svc: the running agent. Cannot create, drop or delete anything.
 REVOKE admin FROM gate_svc;
 GRANT CONNECT ON DATABASE ${DATABASE} TO gate_svc;
 GRANT USAGE ON SCHEMA public TO gate_svc;
+
+-- Last, because this is the one statement a hardened Cloud plan may refuse. sql/schema.sql opens
+-- with \`SET CLUSTER SETTING feature.vector_index.enabled\`, which needs MODIFYCLUSTERSETTING —
+-- a cluster-scoped privilege, so it cannot be granted per-database. It is the single system
+-- privilege either identity holds, and gate_svc does not hold it. If your org refuses it, run
+-- that one SET statement as your org admin: \`npm run schema\` already warns and continues.
+GRANT SYSTEM MODIFYCLUSTERSETTING TO sleeper_admin;
+SQL
+)
+
+TABLE_SQL=$(cat <<SQL
+-- sleeper_admin created these tables on a fresh cluster and already owns them; the explicit grant
+-- is for the case where somebody else ran the schema first.
+GRANT ALL ON ALL TABLES IN SCHEMA public TO sleeper_admin;
+
+-- gate_svc: reads everything, writes exactly what a decision writes.
+--   INSERT events                     ingestEvent — the webhook's own event
+--   INSERT/UPDATE actor_arcs          upsertActorArc is INSERT ... ON CONFLICT DO UPDATE
+--   INSERT release_hold + UPDATE      commitHold writes it; commitUnhold updates it in place,
+--                                     which is how the exit stays append-only rather than a DELETE
+--   INSERT/UPDATE trust_state         both are INSERT ... ON CONFLICT DO UPDATE
+--   INSERT advisory outbox, audit_log append-only by design
+-- No DELETE anywhere, so a hold, its advisory and its audit row cannot be erased by the agent
+-- that wrote them. No INSERT or UPDATE on takeover_playbook: the corpus the gate is judged
+-- against is not writable by the thing being judged.
 GRANT SELECT ON TABLE events, actor_arcs, takeover_playbook, release_hold, trust_state,
                       distro_advisory_outbox, audit_log TO gate_svc;
-GRANT INSERT ON TABLE actor_arcs, release_hold, trust_state,
+GRANT INSERT ON TABLE events, actor_arcs, release_hold, trust_state,
                       distro_advisory_outbox, audit_log TO gate_svc;
-GRANT UPDATE ON TABLE trust_state, distro_advisory_outbox TO gate_svc;
+GRANT UPDATE ON TABLE actor_arcs, release_hold, trust_state TO gate_svc;
 
 SHOW GRANTS ON DATABASE ${DATABASE};
 SQL
 )
 
-apply_grants() {
-  local url="$1"
+# The connection URL carries the SQL password. Passing it as an argv element publishes it to every
+# process on the box for the lifetime of the call (`ps`, /proc), so it travels in the environment
+# instead: COCKROACH_URL is what `cockroach sql` reads natively. psql has no whole-URL variable,
+# so the password alone is split out into PGPASSWORD and the URL that remains carries none.
+url_password() {
+  local rest="${1#*://}" pw
+  case "$rest" in
+    *@*) rest="${rest%%@*}" ;;   # userinfo
+    *)   return 0 ;;
+  esac
+  case "$rest" in
+    *:*) pw="${rest#*:}" ;;
+    *)   return 0 ;;
+  esac
+  # Percent-DECODED. Inside a connection string the password is percent-encoded; PGPASSWORD wants
+  # the literal one, so a generated password containing `@` (encoded `%40`) would otherwise be
+  # sent verbatim and fail to authenticate. Every `%` in a URL userinfo starts an escape, so
+  # rewriting them as `\x` and letting printf %b expand is a complete decode, `%25` included.
+  printf '%b' "${pw//%/\\x}"
+}
+
+url_without_password() {
+  local url="$1" scheme rest userinfo
+  scheme="${url%%://*}"
+  rest="${url#*://}"
+  case "$rest" in
+    *@*) userinfo="${rest%%@*}"; rest="${rest#*@}" ;;
+    *)   printf '%s' "$url"; return 0 ;;
+  esac
+  printf '%s://%s@%s' "$scheme" "${userinfo%%:*}" "$rest"
+}
+
+apply_sql() {
+  local url="$1" sql="$2"
   if command -v cockroach >/dev/null 2>&1; then
-    printf '%s\n' "$GRANTS_SQL" | cockroach sql --url "$url"
+    printf '%s\n' "$sql" | COCKROACH_URL="$url" cockroach sql
   elif command -v psql >/dev/null 2>&1; then
-    printf '%s\n' "$GRANTS_SQL" | psql "$url"
+    printf '%s\n' "$sql" | PGPASSWORD="$(url_password "$url")" psql "$(url_without_password "$url")"
   else
     return 2
   fi
 }
 
+show_sql() { printf '%s\n' "$1" | sed 's/^/      /'; }
+
 if [ "$SKIP_GRANTS" = "1" ]; then
   warn "--skip-grants: both identities are still admins. Apply this before demoing:"
-  printf '%s\n' "$GRANTS_SQL" | sed 's/^/      /'
+  show_sql "$IDENTITY_SQL"
+  show_sql "$TABLE_SQL"
 elif [ "$DRY_RUN" = "1" ]; then
-  printf '  \033[2m$ ccloud cluster sql --connection-url --database %s %s | cockroach sql --url -\033[0m\n' "$DATABASE" "$CLUSTER"
-  printf '%s\n' "$GRANTS_SQL" | sed 's/^/      /'
+  printf '  \033[2m$ COCKROACH_URL="$(ccloud cluster sql --connection-url --database %s %s)" cockroach sql\033[0m\n' "$DATABASE" "$CLUSTER"
+  show_sql "$IDENTITY_SQL"
+  show_sql "$TABLE_SQL"
 else
   ADMIN_URL="$(ccloud cluster sql --connection-url --database "$DATABASE" "$CLUSTER" 2>/dev/null | tail -n1 || true)"
   if [ -z "$ADMIN_URL" ]; then
     warn "could not obtain a connection URL — run these statements yourself:"
-    printf '%s\n' "$GRANTS_SQL" | sed 's/^/      /'
-  elif apply_grants "$ADMIN_URL"; then
-    ok "privilege scopes applied"
+    show_sql "$IDENTITY_SQL"
+    show_sql "$TABLE_SQL"
   else
-    warn "neither \`cockroach\` nor \`psql\` is on PATH (or the statements failed — tables must
-      exist first: run \`npm run schema\`). Run these yourself:"
-    printf '%s\n' "$GRANTS_SQL" | sed 's/^/      /'
+    if apply_sql "$ADMIN_URL" "$IDENTITY_SQL"; then
+      ok "identity scopes applied"
+    else
+      warn "identity grants failed (no \`cockroach\` or \`psql\` on PATH?). Run these yourself:"
+      show_sql "$IDENTITY_SQL"
+    fi
+    # Expected to fail on the very first run, before `npm run schema` has created the tables.
+    # That is why the "Next" block tells you to run this script again afterwards.
+    if apply_sql "$ADMIN_URL" "$TABLE_SQL"; then
+      ok "table scopes applied"
+    else
+      warn "table grants did not apply — the tables must exist first. Run \`npm run schema\` with
+      the sleeper_admin URL, then re-run this script. Or apply them yourself:"
+      show_sql "$TABLE_SQL"
+    fi
   fi
+fi
+
+# Housekeeping for anyone who provisioned before the ingest_svc/gate_svc split was replaced. The
+# script never drops anything on your behalf — it only tells you what is now unused.
+if [ "$DRY_RUN" != "1" ] && [ "$SKIP_GRANTS" != "1" ]; then
+  info "if an \`ingest_svc\` exists from an earlier provision it is now unused; retire it with"
+  info "  DROP USER ingest_svc;   (after checking no deployment still holds its password)"
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -316,13 +417,33 @@ fi
 cat <<EOF
 
 $(bold "Next")
+  The URL above is the org admin's. Take the same URL twice and swap in each identity's own
+  user and password — which command runs as which identity is not a style preference here, it is
+  what the grants in step 4 allow. Every line below was checked by running it.
+
   cp .env.example .env
-    DATABASE_URL         = the connection URL above (use the gate_svc credentials for the agent)
+    DATABASE_URL         = the gate_svc URL — see "Running it" below
     COCKROACH_CLUSTER_ID = ${CLUSTER_ID:-<from the console URL>}
     COCKROACH_MCP_API_KEY= from ./scripts/provision.sh --mcp-key
 
-  npm run schema && npm run seed && npm run calibrate
-  ./scripts/provision.sh                 # re-run once tables exist, to apply the grants
-  npm run replay
-  npm run mcp:audit                      # proves the Managed MCP Server path end to end
+$(bold "  Setup — sleeper_admin.") These create tables, set a cluster setting and DELETE rows.
+  gate_svc is granted none of that and every one of them fails under it.
+      export DATABASE_URL='<the sleeper_admin URL>'
+      npm run schema        # DDL + SET CLUSTER SETTING feature.vector_index.enabled
+      ./scripts/provision.sh   # re-run NOW: the table grants in step 4 need the tables
+      npm run seed          # DELETEs and refills takeover_playbook
+      npm run calibrate     # reads only; writes data/thresholds.json on this machine
+      npm run replay        # opens with resetPackage — six DELETEs
+
+$(bold "  Running it — gate_svc.") Holds a release, clears a hold, and cannot erase either.
+      export DATABASE_URL='<the gate_svc URL>'
+      npm run unhold -- --hold <uuid> --by <who> --note "<why>"
+      npm run explain -- --hold <uuid>          # falls back to SQL without an MCP key
+      the deployed webhook (\`ingestHandler\`)   # never resets; ingest + arc + decision + hold
+
+  \`npm start\` is the exception, and deliberately so: its "Replay the xz timeline" button calls
+  the same resetting replay as the CLI, so the local demo server needs the sleeper_admin URL.
+  The deployed webhook — the path that runs unattended — is the one that runs as gate_svc.
+
+      npm run mcp:audit     # neither SQL identity: the read-only MCP service account
 EOF
