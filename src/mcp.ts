@@ -58,6 +58,10 @@ export const MCP_TOOLS = {
 
 export class McpLimitError extends Error {}
 export class McpToolError extends Error {}
+/** The server answered, but the payload is not a result set this client can read as rows. */
+export class McpResultError extends Error {}
+/** A value could not be safely inlined into SQL text — there is no bind channel to fall back on. */
+export class McpValueError extends Error {}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Configuration and the fallback decision
@@ -115,19 +119,30 @@ export function mcpHeaders(input: { apiKey: string; clusterId?: string | null })
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Splits SQL on statement boundaries, ignoring semicolons inside string literals and comments.
+ * Blanks the *contents* of string literals, quoted identifiers and comments, keeping every
+ * delimiter, every newline and the original length — so an offset into the result is an offset
+ * into the input, and only actual SQL code is left to match against.
  *
- * This exists only to *reject* multi-statement input, not to parse SQL: the server takes one
- * statement per call, and quietly sending it two would either error at demo time or — worse —
- * run only the first.
+ * Every lexical check in this file runs on the output of this scanner rather than on raw SQL,
+ * because both of them were wrong without it and in opposite-looking ways:
+ *
+ *   - `splitStatements` must not see a `;` inside `WHERE detail = 'held; queued'` as a boundary,
+ *   - `hasExplicitLimit` must not see the *characters* "limit 25" inside
+ *     `WHERE detail = 'limit 25 exceeded'` as a bound. That one is the dangerous direction: the
+ *     statement passes the guard, the server applies its implicit LIMIT 25, and a truncated
+ *     evidence trail is handed to a distro packager as a complete one.
+ *
+ * `''` inside a literal needs no special case: the scanner toggles out on the first quote and
+ * back in on the second, which lands in the same state with the same length.
  */
-export function splitStatements(sql: string): string[] {
-  const statements: string[] = []
-  let current = ''
+function redactNonCode(sql: string): string {
+  const out: string[] = []
   let inSingle = false
   let inDouble = false
   let inLineComment = false
   let inBlockComment = false
+
+  const blank = (ch: string): string => (ch === '\n' ? '\n' : ' ')
 
   for (let i = 0; i < sql.length; i++) {
     const ch = sql[i]!
@@ -135,49 +150,69 @@ export function splitStatements(sql: string): string[] {
 
     if (inLineComment) {
       if (ch === '\n') inLineComment = false
-      current += ch
+      out.push(blank(ch))
       continue
     }
     if (inBlockComment) {
       if (ch === '*' && next === '/') {
         inBlockComment = false
-        current += '*/'
+        out.push('*', '/')
         i++
         continue
       }
-      current += ch
+      out.push(blank(ch))
       continue
     }
     if (!inSingle && !inDouble && ch === '-' && next === '-') {
       inLineComment = true
-      current += '--'
+      out.push('-', '-')
       i++
       continue
     }
     if (!inSingle && !inDouble && ch === '/' && next === '*') {
       inBlockComment = true
-      current += '/*'
+      out.push('/', '*')
       i++
       continue
     }
     if (ch === "'" && !inDouble) {
       inSingle = !inSingle
-      current += ch
+      out.push(ch)
       continue
     }
     if (ch === '"' && !inSingle) {
       inDouble = !inDouble
-      current += ch
+      out.push(ch)
       continue
     }
-    if (ch === ';' && !inSingle && !inDouble) {
-      statements.push(current)
-      current = ''
-      continue
-    }
-    current += ch
+    out.push(inSingle || inDouble ? blank(ch) : ch)
   }
-  statements.push(current)
+
+  return out.join('')
+}
+
+/**
+ * Splits SQL on statement boundaries, ignoring semicolons inside string literals and comments.
+ *
+ * This exists only to *reject* multi-statement input, not to parse SQL: the server takes one
+ * statement per call, and quietly sending it two would either error at demo time or — worse —
+ * run only the first.
+ *
+ * Boundaries are found in the redacted copy; the statements themselves are sliced out of the
+ * original, so what gets sent is byte-for-byte what the caller wrote.
+ */
+export function splitStatements(sql: string): string[] {
+  const scanned = redactNonCode(sql)
+  const statements: string[] = []
+  let start = 0
+
+  for (let i = 0; i < scanned.length; i++) {
+    if (scanned[i] === ';') {
+      statements.push(sql.slice(start, i))
+      start = i + 1
+    }
+  }
+  statements.push(sql.slice(start))
 
   return statements.map((s) => s.trim()).filter((s) => s.length > 0 && !isOnlyComment(s))
 }
@@ -216,9 +251,23 @@ export function assertSingleStatement(sql: string): string {
   return statement
 }
 
-/** True when a SELECT already bounds its own result set, so no implicit LIMIT 25 can bite. */
+/**
+ * True when a SELECT already bounds its own result set, so no implicit LIMIT 25 can bite.
+ *
+ * Matched against the redacted copy, never the raw text: `WHERE detail = 'limit 25 exceeded'`
+ * contains the characters "limit 25" and contains no bound, and reading the first as the second
+ * is precisely how a truncated audit trail gets presented as a complete one.
+ *
+ * `LIMIT ALL` is reported as *not* bounded, deliberately — it is spelled like a limit but bounds
+ * nothing, so the server's implicit cap is exactly what a caller would run into.
+ *
+ * Still lexical, and honest about it: this recognises a literal row count, not `LIMIT $1` or a
+ * bound expressed some other way. Everything this project sends carries a literal LIMIT (see
+ * `EVIDENCE_SQL`), so the narrow check is the safe one — it can refuse a valid statement, which
+ * is loud, but it cannot pass a truncatable one, which would be silent.
+ */
 export function hasExplicitLimit(sql: string): boolean {
-  return /\blimit\s+\d+/i.test(sql)
+  return /\blimit\s+\d+/i.test(redactNonCode(sql))
 }
 
 /** A UUID coming from a URL or an argv gets inlined into SQL — so it is validated, not trusted. */
@@ -247,9 +296,25 @@ export function sqlLiteral(value: string): string {
  * well-formed vector of the right width to plan the query, not an exact one, so the literal sent
  * for a plan is rounded. Six decimals keeps 1024 dimensions comfortably inside the limit; the
  * check in `assertSingleStatement` is what actually guarantees it.
+ *
+ * Non-finite components are refused here rather than printed. `NaN` and `Infinity` both stringify
+ * into something that looks like a vector literal — `[1,NaN,Infinity]` — passes every other check
+ * in this file, and fails only at the far end as an opaque server-side parse error on a 16 KB
+ * statement. A `NaN` in an embedding means the model call or the arithmetic upstream went wrong;
+ * saying so at the point of construction names the real problem.
  */
 export function vectorLiteral(embedding: number[], decimals = 6): string {
-  return `[${embedding.map((v) => Number(v.toFixed(decimals))).join(',')}]`
+  const parts = embedding.map((v, i) => {
+    if (!Number.isFinite(v)) {
+      throw new McpValueError(
+        `Embedding component ${i} is ${String(v)}, which is not a finite number and cannot be a ` +
+          `pgvector literal. The server would reject the whole statement as an opaque parse error; ` +
+          `the real fault is upstream, in whatever produced this embedding.`,
+      )
+    }
+    return Number(v.toFixed(decimals))
+  })
+  return `[${parts.join(',')}]`
 }
 
 /**
@@ -343,6 +408,27 @@ export function renderContent(result: McpCallResult, toolName: string): string {
   return text
 }
 
+/** Keeps a diagnostic message readable when the payload behind it is a 16 KB blob. */
+function truncate(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max)}… (${text.length} chars total)`
+}
+
+/** Keys a server realistically uses to report a failure it did NOT flag with `isError`. */
+const ERROR_KEYS = ['error', 'errors', 'error_message', 'errorMessage', 'detail_message']
+
+/** The human-readable part of an error-shaped payload, or null if this does not look like one. */
+function errorShapeMessage(obj: Record<string, unknown>): string | null {
+  for (const key of ERROR_KEYS) {
+    const value = obj[key]
+    if (typeof value === 'string' && value) return value
+    if (value != null && typeof value === 'object') return JSON.stringify(value)
+  }
+  // `{"message": "...", "code": 42501}` — a message with an error code beside it, which no row
+  // this project selects ever has.
+  if (typeof obj.message === 'string' && obj.message && 'code' in obj) return obj.message
+  return null
+}
+
 /**
  * Best-effort row extraction from a `select_query` result.
  *
@@ -350,6 +436,18 @@ export function renderContent(result: McpCallResult, toolName: string): string {
  * SQL-over-MCP server realistically returns — a bare JSON array, an object wrapping `rows`/`data`
  * /`results`, or newline-delimited JSON — and reports which one it found so `npm run mcp:audit`
  * can print it instead of a caller silently receiving zero rows.
+ *
+ * What it will NOT do is invent a row. A bare JSON object with none of the wrapper keys is not a
+ * result set, and treating it as one row was actively harmful: `{"error":"permission denied",
+ * "code":42501}` — the shape you get when the server reports a failure without setting `isError`
+ * — became a row whose `similarity` coerced to `NaN` and whose `created_at` coerced to an Invalid
+ * Date, and the first thing a judge saw was `RangeError: Invalid time value` out of
+ * `scripts/explain.ts` instead of "the service account cannot read release_hold".
+ *
+ * So an error-shaped object throws with the server's own words, and any other unrecognised object
+ * comes back as zero rows under a format tag that names what arrived. If the live server turns out
+ * to encode a single row as a bare object, that tag is where it will show up — as a visible
+ * "unrecognised", not as a silently fabricated row.
  */
 export function parseRows<T = Record<string, unknown>>(text: string): { rows: T[]; format: string } {
   const trimmed = text.trim()
@@ -363,9 +461,17 @@ export function parseRows<T = Record<string, unknown>>(text: string): { rows: T[
         const candidate = (parsed as Record<string, unknown>)[key]
         if (Array.isArray(candidate)) return { rows: candidate as T[], format: `json-object.${key}` }
       }
-      return { rows: [parsed as T], format: 'json-object' }
+      const message = errorShapeMessage(parsed as Record<string, unknown>)
+      if (message) {
+        throw new McpResultError(
+          `The MCP server returned an error-shaped payload instead of rows (and did not set ` +
+            `isError): ${message}. Full payload: ${truncate(trimmed, 400)}`,
+        )
+      }
+      return { rows: [], format: 'json-object.unrecognised' }
     }
-  } catch {
+  } catch (err) {
+    if (err instanceof McpResultError) throw err
     // Not a single JSON document — fall through to NDJSON.
   }
 
@@ -381,6 +487,55 @@ export function parseRows<T = Record<string, unknown>>(text: string): { rows: T[
   }
   if (ndjson.length) return { rows: ndjson, format: 'ndjson' }
   return { rows: [], format: 'unparsed' }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The read-only property, asserted rather than asserted-about
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Verbs whose presence in a tool name means that tool changes data or structure. */
+const WRITE_VERBS = [
+  'insert', 'update', 'delete', 'drop', 'create', 'alter', 'truncate', 'upsert', 'merge',
+  'grant', 'revoke', 'execute', 'exec', 'run', 'write', 'import', 'restore', 'backup',
+]
+
+/** Prefixes that mark a tool as a reader even when a write verb appears later in the name. */
+const READ_PREFIXES = ['get', 'show', 'list', 'describe', 'explain', 'select', 'read', 'analyze']
+
+/**
+ * Tool names the server advertises that this client considers write-capable.
+ *
+ * The README's claim that "MCP is read-only at the protocol layer" rests entirely on the service
+ * account holding a read-only cluster role (`MCP_ROLE` in scripts/provision.sh). Nothing verified
+ * that, which made it a sentence rather than a property. `npm run mcp:audit` now fails on it.
+ *
+ * Honest about what this is: a check on the *names in `tools/list`*, not a proof of the server's
+ * authorization model. It catches the case that actually matters — a session the docs call
+ * read-only being handed `insert_rows` or `execute_sql` — and it would not catch a
+ * read-named tool that writes. A name-based check that runs beats a prose claim that does not.
+ *
+ * `show_create_table` is why the read prefixes exist: "create" appears in the name of a tool that
+ * only ever reads.
+ */
+export function writeCapableTools(toolNames: string[]): string[] {
+  return toolNames.filter((name) => {
+    const tokens = name.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
+    if (tokens.length && READ_PREFIXES.includes(tokens[0]!)) return false
+    return tokens.some((t) => WRITE_VERBS.includes(t))
+  })
+}
+
+/** Throws unless every advertised tool is read-shaped — the audit script's hard gate. */
+export function assertReadOnlyTools(toolNames: string[]): void {
+  const writers = writeCapableTools(toolNames)
+  if (writers.length) {
+    throw new McpToolError(
+      `This MCP session advertises write-capable tools: ${writers.join(', ')}. ` +
+        `The audit path is documented as read-only at the protocol layer, and that claim is only ` +
+        `true while the service account holds a read-only cluster role — check SLEEPER_MCP_ROLE in ` +
+        `scripts/provision.sh (default CLUSTER_DEVELOPER) and the grants on the service account.`,
+    )
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -403,7 +558,13 @@ export interface SqlReader {
   readonly calls: string[]
   select<T = Record<string, unknown>>(sql: string): Promise<T[]>
   explain(sql: string): Promise<string>
-  tableSchema(table: string): Promise<string>
+  /**
+   * `database` is optional because the direct-SQL reader is already inside a database and does not
+   * need it, while the MCP session may well be cluster-scoped — pinned by `mcp-cluster-id` with no
+   * session database — and a server that declares `database` REQUIRED would fail the call
+   * outright. Callers pass `config.databaseName()`; an implementation is free to ignore it.
+   */
+  tableSchema(table: string, database?: string): Promise<string>
   close(): Promise<void>
 }
 
@@ -493,8 +654,14 @@ export class CockroachMcpClient implements SqlReader {
     return renderContent(result, name)
   }
 
-  /** `select_query` — one statement, explicitly LIMITed so the implicit LIMIT 25 cannot truncate. */
-  async select<T = Record<string, unknown>>(sql: string): Promise<T[]> {
+  /**
+   * The single gate every SELECT goes through: one statement, inside the size ceiling, explicitly
+   * LIMITed so the server's implicit LIMIT 25 cannot truncate the evidence trail unnoticed.
+   *
+   * Both public select variants call this, so there is exactly one place the guard can be skipped
+   * and it is nobody's.
+   */
+  private async selectText(sql: string): Promise<string> {
     const statement = assertSingleStatement(sql)
     if (!hasExplicitLimit(statement)) {
       throw new McpLimitError(
@@ -502,14 +669,25 @@ export class CockroachMcpClient implements SqlReader {
           `Add a LIMIT so a truncated evidence trail cannot look like a complete one.`,
       )
     }
-    const text = await this.call(MCP_TOOLS.select, { sql: statement })
-    return parseRows<T>(text).rows
+    return this.call(MCP_TOOLS.select, { sql: statement })
   }
 
-  /** `select_query`, keeping the raw payload and the detected encoding for the audit report. */
+  /** `select_query` — one statement, explicitly LIMITed so the implicit LIMIT 25 cannot truncate. */
+  async select<T = Record<string, unknown>>(sql: string): Promise<T[]> {
+    return parseRows<T>(await this.selectText(sql)).rows
+  }
+
+  /**
+   * `select_query`, keeping the raw payload and the detected encoding for the audit report.
+   *
+   * Goes through `select()` rather than calling the tool itself. It used to duplicate the call and
+   * skip the LIMIT guard — the one thing this class exists to enforce — which meant the moment
+   * anyone reached for the richer return type they would silently inherit the truncation bug.
+   * The encoding is worth surfacing (the result format is not in the published contract, so
+   * `npm run mcp:audit` prints which shape the live server actually used); the exemption was not.
+   */
   async selectRaw<T = Record<string, unknown>>(sql: string): Promise<{ rows: T[]; format: string; text: string }> {
-    const statement = assertSingleStatement(sql)
-    const text = await this.call(MCP_TOOLS.select, { sql: statement })
+    const text = await this.selectText(sql)
     return { ...parseRows<T>(text), text }
   }
 
@@ -522,7 +700,15 @@ export class CockroachMcpClient implements SqlReader {
     return this.call(MCP_TOOLS.explain, { sql: assertSingleStatement(sql) })
   }
 
-  /** `get_table_schema` — the evidence tables described by the cluster, not by sql/schema.sql. */
+  /**
+   * `get_table_schema` — the evidence tables described by the cluster, not by sql/schema.sql.
+   *
+   * `database` matters more than it looks. This session is pinned to a cluster by the
+   * `mcp-cluster-id` header and has no session database of its own, so if the server declares
+   * `database` REQUIRED — the likely shape for a cluster-scoped tool — omitting it makes
+   * `shapeArguments` throw before the call leaves. Callers pass `config.databaseName()`, derived
+   * from DATABASE_URL, so the name never has to be guessed or hardcoded.
+   */
   async tableSchema(table: string, database?: string): Promise<string> {
     return this.call(MCP_TOOLS.tableSchema, { table, database })
   }

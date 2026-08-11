@@ -94,6 +94,19 @@ button:disabled { background: var(--text-low); color: var(--bg-base); cursor: pr
   font-size: 0.8125rem;
 }
 
+/* Full-width degraded notice: it sits between the header and the intro, outside <main>. */
+.warn.banner { margin: 0 auto; max-width: 1180px; width: calc(100% - 48px); }
+
+/*
+ * The audit-path readout. Green when the Managed MCP Server served the reads, muted when the run
+ * fell back to direct SQL — the fallback is legitimate and expected on a checkout with no MCP
+ * credentials, so it is stated plainly rather than flagged as an error. The `title` attribute
+ * carries the server's own reason string.
+ */
+#stat-audit { font-size: 0.875rem; cursor: help; }
+#stat-audit.via-mcp { color: var(--primary); }
+#stat-audit.via-direct { color: var(--text-low); }
+
 .grid {
   display: grid;
   grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);

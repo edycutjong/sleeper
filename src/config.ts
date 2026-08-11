@@ -14,6 +14,35 @@ export const config = {
   databaseUrl: () => required('DATABASE_URL'),
 
   /**
+   * The database the evidence tables live in, for tool calls that must name it explicitly.
+   *
+   * The MCP session is pinned to a *cluster* by the `mcp-cluster-id` header and has no session
+   * database, so `get_table_schema` may need the database as an argument — and if the server
+   * declares it required, a call without it fails before it leaves (see `shapeArguments`). Derived
+   * from DATABASE_URL rather than hardcoded or asked for a second time, because those are the two
+   * ways this drifts out of agreement with the cluster the rest of the demo talks to.
+   *
+   * Returns null rather than throwing, and does NOT go through `required()`: an MCP-only checkout
+   * with no DATABASE_URL must still be able to dial the server, and a cluster-scoped session that
+   * does not need the argument must not be blocked by a missing var it never uses.
+   * `SLEEPER_DATABASE` — the same override scripts/provision.sh uses when creating the database —
+   * wins, for the case where the two genuinely differ.
+   */
+  databaseName: (env: NodeJS.ProcessEnv = process.env): string | null => {
+    if (env.SLEEPER_DATABASE) return env.SLEEPER_DATABASE
+    const url = env.DATABASE_URL
+    if (!url) return null
+    try {
+      const name = decodeURIComponent(new URL(url).pathname).replace(/^\//, '')
+      return name || null
+    } catch {
+      // A connection string this code cannot parse is not a reason to fail the audit — the
+      // argument is omitted and the server either does not need it or says so.
+      return null
+    }
+  },
+
+  /**
    * CockroachDB Cloud Managed MCP Server — the read-only audit path.
    *
    * Deliberately OPTIONAL, and read through `required()` nowhere: a checkout with no MCP

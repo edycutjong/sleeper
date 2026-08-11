@@ -10,16 +10,21 @@
  * cannot leak into each other or into whatever is in the developer's .env.
  */
 import { describe, expect, it } from 'vitest'
+import { config } from '../src/config.js'
 import {
   CockroachMcpClient,
   MCP_ENDPOINT,
   MCP_MAX_STATEMENT_CHARS,
   MCP_TOOLS,
   McpLimitError,
+  McpResultError,
   McpToolError,
+  McpValueError,
+  assertReadOnlyTools,
   assertSingleStatement,
   assertUuid,
   hasExplicitLimit,
+  writeCapableTools,
   mcpHeaders,
   parseRows,
   planProbeVector,
@@ -181,6 +186,33 @@ describe('statement limits — one statement per call, ≤16,384 chars', () => {
     expect(hasExplicitLimit('SELECT 1 LIMIT 10')).toBe(true)
     expect(hasExplicitLimit('SELECT 1')).toBe(false)
   })
+
+  // The dangerous direction of the same lexical problem the literal-semicolon test covers. A
+  // statement whose *data* contains the characters "limit 25" is unbounded; counting it as bounded
+  // sends it, lets the server apply its implicit LIMIT 25, and presents a truncated audit trail
+  // as a complete one — the exact failure the LIMIT guard exists to make impossible.
+  it('does not count "limit 25" inside a string literal as a bound', () => {
+    expect(hasExplicitLimit(`SELECT detail FROM audit_log WHERE detail = 'limit 25 exceeded'`)).toBe(false)
+    expect(hasExplicitLimit(`SELECT 1 WHERE a = 'x' AND b = 'limit 9' LIMIT 3`)).toBe(true)
+  })
+
+  it('does not count a LIMIT inside a comment or a quoted identifier as a bound', () => {
+    expect(hasExplicitLimit('SELECT detail FROM audit_log -- limit 25\n')).toBe(false)
+    expect(hasExplicitLimit('SELECT /* limit 9 */ detail FROM audit_log')).toBe(false)
+    expect(hasExplicitLimit('SELECT "limit 5" FROM t')).toBe(false)
+  })
+
+  it('treats LIMIT ALL as unbounded, because it is', () => {
+    expect(hasExplicitLimit('SELECT 1 LIMIT ALL')).toBe(false)
+  })
+
+  it('rejects an unbounded SELECT whose literal merely mentions a limit', async () => {
+    const { client, server } = await connected()
+    await expect(
+      client.select(`SELECT detail FROM audit_log WHERE detail = 'limit 25 exceeded'`),
+    ).rejects.toThrow(McpLimitError)
+    expect(server.sent).toHaveLength(0)
+  })
 })
 
 describe('SQL literal construction — there is no bind-parameter channel over MCP', () => {
@@ -233,6 +265,17 @@ describe('vectorLiteral — 1024 dimensions inside a 16,384-char statement', () 
     expect(scopedNeighbourExplainSql("x'; DROP TABLE events; --", planProbeVector(4), 5)).toContain(
       "WHERE package_id = 'x''; DROP TABLE events; --'",
     )
+  })
+
+  // `[1,NaN,Infinity]` is well-formed enough to pass every other check in the client and is
+  // rejected only by the server, as an opaque parse error on a 16 KB statement. A non-finite
+  // component means the embedding upstream is broken; the error should say that.
+  it('refuses a non-finite component instead of printing NaN into the literal', () => {
+    expect(() => vectorLiteral([1, NaN, 0])).toThrow(McpValueError)
+    expect(() => vectorLiteral([1, NaN, 0])).toThrow(/component 1 is NaN/)
+    expect(() => vectorLiteral([0, Infinity])).toThrow(/component 1 is Infinity/)
+    expect(() => vectorLiteral([0, -Infinity])).toThrow(McpValueError)
+    expect(vectorLiteral([0, -0, 1e-9])).toBe('[0,0,0]')
   })
 })
 
@@ -330,6 +373,31 @@ describe('response handling', () => {
     expect(parseRows('id | name\n1  | x').format).toBe('unparsed')
     expect(parseRows('   ').format).toBe('empty')
   })
+
+  // A bare JSON object with no rows/data/results/records array is not a result set. Wrapping it as
+  // "one row" fabricated evidence: every column read off it was undefined, `similarity` coerced to
+  // NaN, `created_at` to an Invalid Date, and `npm run explain` died with `RangeError: Invalid
+  // time value` — a stack trace where the operator needed a sentence.
+  it('does not fabricate a row out of an object that is not a result set', () => {
+    expect(parseRows('{"note":"no rows returned"}')).toEqual({
+      rows: [],
+      format: 'json-object.unrecognised',
+    })
+  })
+
+  it('throws with the server’s own words when the payload is an error it did not flag', () => {
+    expect(() => parseRows('{"error":"permission denied","code":42501}')).toThrow(McpResultError)
+    expect(() => parseRows('{"error":"permission denied","code":42501}')).toThrow(/permission denied/)
+    // `isError` unset is the whole point: this is the shape that got past renderContent.
+    expect(() => parseRows('{"message":"relation does not exist","code":"42P01"}')).toThrow(
+      /relation does not exist/,
+    )
+  })
+
+  it('still reads a legitimate row whose own column happens to be called error', () => {
+    // The wrapper keys are checked first, so a real result set is never mistaken for a failure.
+    expect(parseRows('{"rows":[{"error":"handled"}]}').rows).toEqual([{ error: 'handled' }])
+  })
 })
 
 describe('CockroachMcpClient — request shaping and limits, end to end without a server', () => {
@@ -401,6 +469,99 @@ describe('CockroachMcpClient — request shaping and limits, end to end without 
     const client = new CockroachMcpClient({ clientFactory: async () => fakeServer().client })
     await expect(client.select('SELECT 1 LIMIT 1')).rejects.toThrow(/connect\(\) has not been called/)
   })
+
+  it('passes the database through to get_table_schema when one is supplied', async () => {
+    const { client, server } = await connected({
+      respond: () => ({ content: [{ type: 'text', text: 'CREATE TABLE …' }] }),
+    })
+    await client.tableSchema('release_hold', 'sleeper')
+    expect(server.sent[0]!.args).toEqual({ table: 'release_hold', database: 'sleeper' })
+  })
+
+  // The failure this prevents is the likely first-live-run one: a cluster-scoped session has no
+  // session database, so if the server declares `database` REQUIRED, a call that cannot supply it
+  // dies in shapeArguments before anything is dialled.
+  it('can satisfy a get_table_schema that declares database REQUIRED', async () => {
+    const strict = [
+      toolDef(MCP_TOOLS.tableSchema, { table: {}, database: {} }, ['table', 'database']),
+    ]
+    const { client, server } = await connected({
+      tools: strict,
+      respond: () => ({ content: [{ type: 'text', text: 'CREATE TABLE …' }] }),
+    })
+    await expect(client.tableSchema('events')).rejects.toThrow(/requires database/)
+    await client.tableSchema('events', 'sleeper')
+    expect(server.sent).toHaveLength(1)
+    expect(server.sent[0]!.args).toEqual({ table: 'events', database: 'sleeper' })
+  })
+
+  it('holds selectRaw to the same LIMIT guard as select, and reports the encoding', async () => {
+    const { client, server } = await connected({
+      respond: () => ({ content: [{ type: 'text', text: '{"rows":[{"id":"h1"}]}' }] }),
+    })
+    await expect(client.selectRaw('SELECT id FROM audit_log')).rejects.toThrow(McpLimitError)
+    expect(server.sent).toHaveLength(0)
+    const raw = await client.selectRaw<{ id: string }>('SELECT id FROM audit_log LIMIT 5')
+    expect(raw).toMatchObject({ rows: [{ id: 'h1' }], format: 'json-object.rows' })
+  })
+})
+
+describe('the read-only claim, checked instead of asserted', () => {
+  it('accepts the four read tools this project drives', () => {
+    expect(writeCapableTools(Object.values(MCP_TOOLS))).toEqual([])
+    expect(() => assertReadOnlyTools(Object.values(MCP_TOOLS))).not.toThrow()
+  })
+
+  it('flags a write tool by name', () => {
+    expect(writeCapableTools(['select_query', 'insert_rows'])).toEqual(['insert_rows'])
+    expect(writeCapableTools(['create_table', 'execute_sql', 'run_ddl'])).toEqual([
+      'create_table',
+      'execute_sql',
+      'run_ddl',
+    ])
+  })
+
+  it('does not flag a reader whose name merely contains a write verb', () => {
+    expect(writeCapableTools(['show_create_table', 'get_create_statement'])).toEqual([])
+  })
+
+  // What `npm run mcp:audit` does with the same call: the README tells a distro packager the audit
+  // path is read-only at the protocol layer, and that is only true while the service account holds
+  // a read-only cluster role. A session advertising insert_rows must fail the audit, not warn.
+  it('fails on a session that advertises a write tool, naming the role to fix', async () => {
+    const { client } = await connected({
+      tools: [...SERVER_TOOLS, toolDef('insert_rows', { table: {}, rows: {} }, ['table', 'rows'])],
+    })
+    expect(client.availableTools()).toContain('insert_rows')
+    expect(() => assertReadOnlyTools(client.availableTools())).toThrow(McpToolError)
+    expect(() => assertReadOnlyTools(client.availableTools())).toThrow(/insert_rows/)
+    expect(() => assertReadOnlyTools(client.availableTools())).toThrow(/SLEEPER_MCP_ROLE/)
+  })
+})
+
+describe('config.databaseName — the database an MCP tool call has to name for itself', () => {
+  it('derives the database from DATABASE_URL rather than asking for it twice', () => {
+    expect(config.databaseName({ DATABASE_URL: 'postgresql://root@localhost:26257/sleeper?sslmode=disable' })).toBe(
+      'sleeper',
+    )
+    expect(
+      config.databaseName({
+        DATABASE_URL: 'postgresql://u:p@free-tier.gcp.cockroachlabs.cloud:26257/sleeper-cluster.defaultdb',
+      }),
+    ).toBe('sleeper-cluster.defaultdb')
+  })
+
+  it('lets SLEEPER_DATABASE win, since provision.sh uses the same override', () => {
+    expect(config.databaseName({ DATABASE_URL: 'postgresql://h/a', SLEEPER_DATABASE: 'b' })).toBe('b')
+  })
+
+  it('returns null instead of throwing when there is nothing to derive from', () => {
+    // An MCP-only checkout must still be able to dial the server, and a server that does not
+    // require the argument must not be blocked by a var it never uses.
+    expect(config.databaseName({})).toBeNull()
+    expect(config.databaseName({ DATABASE_URL: 'postgresql://host:26257/' })).toBeNull()
+    expect(config.databaseName({ DATABASE_URL: 'not a url' })).toBeNull()
+  })
 })
 
 describe('resolveSqlReader — the fallback is explicit, never silent', () => {
@@ -444,6 +605,220 @@ describe('resolveSqlReader — the fallback is explicit, never silent', () => {
     expect(reader.via).toBe('direct')
     expect(reader.reason).toContain('401 Unauthorized')
     expect(reader.reason).toContain('fell back to direct SQL')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fixture replay
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Recorded-shape payloads, replayed through the real `CockroachMcpClient`.
+ *
+ * The honest limitation of this whole file is stated plainly: this client has never been run
+ * against the live Managed MCP Server, because we have no service-account key. Fixtures are the
+ * strongest substitute available — not proof the server answers this way, but a pinned contract.
+ * If the live server disagrees, the disagreement surfaces as a specific failing expectation in a
+ * suite that runs in 20 ms, instead of as a stack trace mid-demo.
+ *
+ * The unhappy paths matter more here than the happy one. Three are recorded because all three are
+ * things a real server does: a tool-level error with `isError` set, a permission failure returned
+ * as a plain JSON object with `isError` NOT set (the shape that used to be silently turned into a
+ * fabricated row), and a non-row informational payload.
+ */
+const FIXTURES = {
+  /** `select_query` on the hold — one row, wrapped, every scalar a JSON string. */
+  hold: JSON.stringify({
+    columns: ['id', 'package_id', 'release_version', 'reason', 'similarity', 'created_at', 'matched_playbook_id'],
+    rows: [
+      {
+        id: HOLD_ID,
+        package_id: 'xz-utils',
+        release_version: '5.6.0',
+        reason: 'arc matches a known takeover shape',
+        similarity: '0.8731',
+        created_at: '2024-02-24 00:00:00+00',
+        matched_playbook_id: ARC_ID,
+      },
+    ],
+  }),
+  matchedArc: JSON.stringify({
+    rows: [{ package_id: 'event-stream', label: 'takeover', source: 'synthetic', arc_summary: 'arc' }],
+  }),
+  trust: JSON.stringify({ rows: [{ status: 'held' }] }),
+  advisories: JSON.stringify({
+    rows: [{ id: 'a1', advisory_text: 'Hold 5.6.0 pending review', sent: 'false' }],
+  }),
+  auditTrail: JSON.stringify({
+    rows: [
+      { actor: 'agent', action: 'hold', detail: null, created_at: '2024-02-24 00:00:01+00' },
+      { actor: 'agent', action: 'advisory_queued', detail: 'debian', created_at: '2024-02-24 00:00:01+00' },
+    ],
+  }),
+  /** No rows at all — a legitimately empty result set, not an error. */
+  noRows: JSON.stringify({ rows: [] }),
+
+  /** `explain_query` — CockroachDB's plan text, as the server renders it. */
+  plan: [
+    'distribution: local',
+    'vectorized: true',
+    '',
+    '• vector search',
+    '│ table: events@events_package_embedding_idx',
+    '│ prefix spans: 1 span',
+    '│ target count: 20',
+    '',
+    '└── • scan',
+    '      table: events@events_pkey',
+  ].join('\n'),
+
+  /** `get_table_schema` — SHOW CREATE TABLE as the cluster describes it. */
+  tableSchema: [
+    'CREATE TABLE public.release_hold (',
+    '\tid UUID NOT NULL DEFAULT gen_random_uuid(),',
+    '\tpackage_id STRING NOT NULL,',
+    '\trelease_version STRING NOT NULL,',
+    '\tsimilarity FLOAT8 NOT NULL,',
+    '\tcreated_at TIMESTAMPTZ NOT NULL DEFAULT now(),',
+    '\tCONSTRAINT release_hold_pkey PRIMARY KEY (id ASC)',
+    ')',
+  ].join('\n'),
+
+  /** A failure the server DID flag — `renderContent` must turn this into a thrown error. */
+  toolError: {
+    isError: true,
+    content: [{ type: 'text', text: 'ERROR: user sleeper-mcp does not have SELECT privilege on relation release_hold' }],
+  } satisfies McpCallResult,
+
+  /** A failure the server did NOT flag. This is the B2 shape: valid JSON, no `isError`, no rows. */
+  permissionDeniedPayload: JSON.stringify({ error: 'permission denied for table release_hold', code: '42501' }),
+
+  /** A non-row informational payload — must not become a row either. */
+  notePayload: JSON.stringify({ note: 'no rows returned' }),
+} as const
+
+/** Serves the five evidence statements from fixtures, keyed off the table each one reads. */
+function evidenceFixtureFor(sql: string): string {
+  if (sql.includes('FROM release_hold')) return FIXTURES.hold
+  if (sql.includes('FROM takeover_playbook')) return FIXTURES.matchedArc
+  if (sql.includes('FROM trust_state')) return FIXTURES.trust
+  if (sql.includes('FROM distro_advisory_outbox')) return FIXTURES.advisories
+  if (sql.includes('FROM audit_log')) return FIXTURES.auditTrail
+  return FIXTURES.noRows
+}
+
+describe('fixture replay — the recorded contract this client will meet on its first live run', () => {
+  /** A server that answers every tool from the fixtures above, with a per-tool override hook. */
+  function replayServer(override?: (name: string, sql: string) => McpCallResult | undefined) {
+    return fakeServer({
+      respond: (name, args) => {
+        const sql = String(args.sql ?? '')
+        const overridden = override?.(name, sql)
+        if (overridden) return overridden
+        if (name === MCP_TOOLS.select) return { content: [{ type: 'text', text: evidenceFixtureFor(sql) }] }
+        if (name === MCP_TOOLS.explain) return { content: [{ type: 'text', text: FIXTURES.plan }] }
+        if (name === MCP_TOOLS.tableSchema) return { content: [{ type: 'text', text: FIXTURES.tableSchema }] }
+        if (name === MCP_TOOLS.show) return { content: [{ type: 'text', text: 'sleeper' }] }
+        return { content: [{ type: 'text', text: FIXTURES.noRows }] }
+      },
+    })
+  }
+
+  async function replayClient(override?: Parameters<typeof replayServer>[0]) {
+    const server = replayServer(override)
+    const client = new CockroachMcpClient({ clientFactory: async () => server.client }, 'fixture replay')
+    await client.connect()
+    return { client, server }
+  }
+
+  it('reads a wrapped select_query payload as rows, reporting the encoding it found', async () => {
+    const { client } = await replayClient()
+    const raw = await client.selectRaw<{ id: string }>(EVIDENCE_SQL.hold(HOLD_ID))
+    expect(raw.format).toBe('json-object.rows')
+    expect(raw.rows[0]!.id).toBe(HOLD_ID)
+  })
+
+  it('carries the whole five-call evidence trail through the real client', async () => {
+    const { client } = await replayClient()
+    const evidence = await holdEvidence(HOLD_ID, client)
+    expect(evidence).not.toBeNull()
+    expect(evidence!.hold.releaseVersion).toBe('5.6.0')
+    expect(evidence!.hold.similarity).toBeCloseTo(0.8731)
+    expect(Number.isNaN(evidence!.hold.createdAt.getTime())).toBe(false)
+    expect(evidence!.trustStatus).toBe('held')
+    expect(evidence!.matchedArc?.label).toBe('takeover')
+    expect(evidence!.advisories[0]!.sent).toBe(false)
+    expect(evidence!.auditTrail).toHaveLength(2)
+    // Five select_query calls and nothing else — the audit is reads only, one statement each.
+    expect(client.calls.filter((c) => c === MCP_TOOLS.select)).toHaveLength(5)
+    expect(new Set(client.calls)).toEqual(new Set(['tools/list', MCP_TOOLS.select]))
+  })
+
+  it('keeps the prefix-spans proof the demo claims, in the shape the audit greps for', async () => {
+    const { client } = await replayClient()
+    const plan = await client.explain(
+      `SELECT id FROM events WHERE package_id = 'xz-utils' ORDER BY embedding <=> '[0]'::VECTOR LIMIT 20`,
+    )
+    // Same two regexes scripts/mcp-audit.ts prints its verdict from.
+    expect(/prefix spans:/i.test(plan)).toBe(true)
+    expect(/vector search/i.test(plan)).toBe(true)
+  })
+
+  it('returns the cluster’s own CREATE TABLE text from get_table_schema', async () => {
+    const { client } = await replayClient()
+    const schema = await client.tableSchema('release_hold', 'sleeper')
+    expect(schema).toContain('CREATE TABLE public.release_hold')
+    expect(schema).toContain('similarity FLOAT8 NOT NULL')
+  })
+
+  it('turns a flagged tool error into a thrown error carrying the server’s message', async () => {
+    const { client } = await replayClient((name) => (name === MCP_TOOLS.select ? FIXTURES.toolError : undefined))
+    await expect(client.select(EVIDENCE_SQL.hold(HOLD_ID))).rejects.toThrow(McpToolError)
+    await expect(client.select(EVIDENCE_SQL.hold(HOLD_ID))).rejects.toThrow(/does not have SELECT privilege/)
+  })
+
+  // The one that used to be silent, and the reason this whole block exists. The service account
+  // cannot read release_hold; the server says so in a JSON body without setting isError. Before
+  // the fix this became one fabricated row, holdEvidence returned a non-null object with
+  // similarity NaN and an Invalid Date, and the first symptom was `RangeError: Invalid time value`
+  // thrown from `scripts/explain.ts` while printing it.
+  it('refuses an unflagged permission failure instead of fabricating a row from it', async () => {
+    const { client } = await replayClient((name) =>
+      name === MCP_TOOLS.select
+        ? { content: [{ type: 'text', text: FIXTURES.permissionDeniedPayload }] }
+        : undefined,
+    )
+    await expect(client.select(EVIDENCE_SQL.hold(HOLD_ID))).rejects.toThrow(McpResultError)
+    await expect(holdEvidence(HOLD_ID, client)).rejects.toThrow(/permission denied for table release_hold/)
+  })
+
+  it('treats a non-row informational payload as no rows, so holdEvidence reports nothing found', async () => {
+    const { client } = await replayClient((name) =>
+      name === MCP_TOOLS.select ? { content: [{ type: 'text', text: FIXTURES.notePayload }] } : undefined,
+    )
+    expect(await client.select(EVIDENCE_SQL.hold(HOLD_ID))).toEqual([])
+    // Null — "no such hold" — rather than an evidence object built out of nothing.
+    expect(await holdEvidence(HOLD_ID, client)).toBeNull()
+  })
+
+  it('reads an empty result set as empty without inventing a hold', async () => {
+    const { client } = await replayClient((name) =>
+      name === MCP_TOOLS.select ? { content: [{ type: 'text', text: FIXTURES.noRows }] } : undefined,
+    )
+    expect(await holdEvidence(HOLD_ID, client)).toBeNull()
+  })
+
+  it('sends every evidence statement as one statement inside the documented limits', async () => {
+    const { client, server } = await replayClient()
+    await holdEvidence(HOLD_ID, client)
+    expect(server.sent).toHaveLength(5)
+    for (const call of server.sent) {
+      const sql = String(call.args.sql)
+      expect(assertSingleStatement(sql)).toBe(sql)
+      expect(sql.length).toBeLessThanOrEqual(MCP_MAX_STATEMENT_CHARS)
+      expect(hasExplicitLimit(sql)).toBe(true)
+      expect(call.timeout).toBe(20_000)
+    }
   })
 })
 

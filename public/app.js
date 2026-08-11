@@ -22,6 +22,26 @@ async function loadState() {
     text($('stat-trust'), state.trustStatus ?? '—')
     text($('provider'), state.provider)
     $('offline-warning').hidden = !state.offline
+
+    // Which path served the audit reads. Shown rather than claimed: if the Managed MCP Server is
+    // not configured or could not be reached, this says `direct SQL` and the tooltip says why.
+    const audit = $('stat-audit')
+    audit.textContent = state.audit.via === 'mcp' ? 'MCP' : 'direct SQL'
+    audit.className = state.audit.via === 'mcp' ? 'via-mcp' : 'via-direct'
+    audit.title = state.audit.reason
+
+    // /api/state now answers 200 with a `degraded` code instead of throwing a 500, so the page can
+    // say what is broken instead of only that something is.
+    const banner = $('degraded-warning')
+    banner.hidden = !state.degraded
+    if (state.degraded) {
+      text(
+        banner,
+        state.degraded === 'db_unreachable'
+          ? 'The CockroachDB cluster is not reachable — counts below are placeholders and a replay will fail. Check /api/health.'
+          : `Server reports degraded state: ${state.degraded}. Check /api/health.`,
+      )
+    }
   } catch {
     text($('provider'), 'server unreachable')
   }
@@ -134,7 +154,37 @@ function renderSummary(summary) {
   )
 }
 
-function startReplay() {
+const HANDLERS = {
+  event: renderEvent,
+  arc: renderArc,
+  explain: renderExplain,
+  match: renderMatch,
+  decision: renderDecision,
+  hold: renderHold,
+}
+
+/**
+ * Minimal server-sent-event frame parser.
+ *
+ * `EventSource` can only issue GETs, and /api/replay is a POST now because it resets this
+ * package's memory before it replays — a destructive action behind a GET was one prefetch away
+ * from wiping the demo mid-recording. The protocol on the wire is unchanged; only the client
+ * transport is, so the server still streams plain SSE and `curl -N -XPOST` still works.
+ *
+ * `onFrame` is called once per `\n\n`-terminated frame.
+ */
+function parseSseFrame(frame, onFrame) {
+  let name = 'message'
+  const data = []
+  for (const line of frame.split('\n')) {
+    if (line.startsWith('event:')) name = line.slice(6).trim()
+    else if (line.startsWith('data:')) data.push(line.slice(5).trim())
+    // Comment lines (":…") and unknown fields are ignored, per the SSE spec.
+  }
+  if (data.length) onFrame(name, data.join('\n'))
+}
+
+async function startReplay() {
   const button = $('replay')
   button.disabled = true
   button.textContent = 'Replaying…'
@@ -145,31 +195,81 @@ function startReplay() {
   }
   text($('stat-events'), 0)
 
-  const source = new EventSource('/api/replay')
   const finish = (label) => {
-    source.close()
     button.disabled = false
     button.textContent = label
   }
-
-  source.addEventListener('event', (e) => renderEvent(JSON.parse(e.data)))
-  source.addEventListener('arc', (e) => renderArc(JSON.parse(e.data)))
-  source.addEventListener('explain', (e) => renderExplain(JSON.parse(e.data)))
-  source.addEventListener('match', (e) => renderMatch(JSON.parse(e.data)))
-  source.addEventListener('decision', (e) => renderDecision(JSON.parse(e.data)))
-  source.addEventListener('hold', (e) => renderHold(JSON.parse(e.data)))
-  source.addEventListener('summary', (e) => {
-    renderSummary(JSON.parse(e.data))
-    finish('Replay again')
-  })
-  source.addEventListener('failed', (e) => {
+  const fail = (message) => {
     $('verdict-panel').hidden = false
-    text($('verdict'), `Replay failed: ${JSON.parse(e.data).message}`)
+    text($('verdict'), message)
     finish('Retry')
-  })
-  // EventSource auto-reconnects on a dropped connection, which would restart the whole replay.
-  source.onerror = () => finish('Retry')
+  }
+
+  let response
+  try {
+    response = await fetch('/api/replay', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+  } catch {
+    fail('Replay failed: the server is not reachable.')
+    return
+  }
+
+  if (!response.ok || !response.body) {
+    // 409 (already running) and 405 (wrong method) both arrive as JSON, not as a stream.
+    const detail = await response.json().catch(() => ({}))
+    fail(`Replay failed (${response.status}): ${detail.message ?? detail.error ?? 'unknown error'}`)
+    return
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let finished = false
+
+  const dispatch = (name, payload) => {
+    const step = JSON.parse(payload)
+    if (name === 'summary') {
+      renderSummary(step)
+      finished = true
+      finish('Replay again')
+      return
+    }
+    if (name === 'failed') {
+      // The server no longer returns the raw error text; it returns a code plus a reference that
+      // ties this failure to the log line holding the detail.
+      finished = true
+      fail(`Replay failed (${step.error}). Reference ${step.ref} — see the server log.`)
+      return
+    }
+    HANDLERS[name]?.(step)
+  }
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      let boundary
+      while ((boundary = buffer.indexOf('\n\n')) !== -1) {
+        parseSseFrame(buffer.slice(0, boundary), dispatch)
+        buffer = buffer.slice(boundary + 2)
+      }
+    }
+  } catch {
+    fail('Replay failed: the stream was interrupted.')
+    return
+  }
+
+  // A stream that ended without a summary or a failure event means the connection dropped
+  // mid-replay. Unlike EventSource there is no auto-reconnect to restart the whole thing behind
+  // our back, so the button simply offers a retry.
+  if (!finished) fail('Replay ended without a result — the connection dropped.')
 }
 
-$('replay').addEventListener('click', startReplay)
+$('replay').addEventListener('click', () => {
+  void startReplay()
+})
 loadState()
