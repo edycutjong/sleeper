@@ -143,7 +143,11 @@ npm test          # unit tests only; integration tests skip without DATABASE_URL
 DATABASE_URL='postgresql://root@localhost:26257/sleeper?sslmode=disable' npm test
 ```
 
-61 tests. The integration suite runs against a real cluster and asserts, among other things:
+207 tests: `168 passed | 39 skipped` with no database, `207 passed` against a reachable cluster.
+A `DATABASE_URL` that is set but unreachable skips the 39 and prints why rather than failing —
+a stale credential should not look like broken code.
+
+The cluster-backed suite asserts, among other things:
 
 - `EXPLAIN` on the scoped query contains `prefix spans` and names the vector index
 - held-out arcs are never returned by any retrieval the agent performs
@@ -182,4 +186,4 @@ context between calls and a socket left open across a freeze comes back dead.
 | 1:30–2:00 | Playbook match, decision, then the HOLD panel: one transaction, four writes, one COMMIT. |
 | 2:00–2:30 | `npm run explain -- --hold <id>` — the evidence trail a distro packager reads. Then `npm run bench` output, labelled as held-out and separate from the replay. |
 | 2:30–2:45 | On-screen text: CockroachDB tools used (Distributed Vector Indexing, Managed MCP Server, ccloud CLI) and AWS services used (Bedrock Titan, Bedrock Claude, Lambda). |
-| 2:45–3:00 | "The real world found this 35 days later, by luck." |
+| 2:45–3:00 | "The real world found this 34 days later, by luck." |

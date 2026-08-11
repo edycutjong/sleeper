@@ -36,8 +36,10 @@ import {
   scopedNeighbours,
   upsertActorArc,
 } from '../src/memory.js'
+import { LIVE as liveCluster } from './live.js'
 
-const LIVE = Boolean(process.env.DATABASE_URL)
+// Reachability, not just presence — see tests/live.ts for why the distinction matters.
+const LIVE = liveCluster
 
 // Distinct per run so a failed run never poisons the next one, and so these can share a cluster
 // with the demo without touching xz-utils rows.

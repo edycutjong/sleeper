@@ -15,8 +15,10 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { once } from 'node:events'
 import { createLogger, setLogSink, type LogLine } from '../src/log.js'
 import { closePool, query } from '../src/db.js'
+import { LIVE as liveCluster } from './live.js'
 
-const LIVE = Boolean(process.env.DATABASE_URL)
+// Reachability, not just presence — see tests/live.ts for why the distinction matters.
+const LIVE = liveCluster
 
 // A port of its own so this never collides with a demo server the developer left running.
 const PORT = 3400 + (process.pid % 200)

@@ -1,0 +1,1377 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sleeper — the release gate that remembers</title>
+<meta name="description" content="A release-gate agent whose multi-year memory in CockroachDB — every commit, email and maintainer change — recognises the shape of a slow supply-chain takeover and holds the poisoned release before it ships.">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0A0F1D">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#F6F4ED">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Sleeper">
+<meta property="og:title" content="Sleeper — the release gate that remembers">
+<meta property="og:description" content="A backdoor planted over 28 months is invisible to every per-commit check. Only a memory that spans those years can see it.">
+<meta property="og:image" content="assets/og-image.png">
+<meta property="og:image:alt" content="Sleeper — release-gate agent with multi-year memory, built on CockroachDB and AWS Bedrock">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Sleeper — the release gate that remembers">
+<meta name="twitter:description" content="A backdoor planted over 28 months is invisible to every per-commit check. Only a memory that spans those years can see it.">
+<meta name="twitter:image" content="assets/og-image.png">
+<meta name="twitter:image:alt" content="Sleeper — release-gate agent with multi-year memory, built on CockroachDB and AWS Bedrock">
+<link rel="icon" type="image/svg+xml" href="assets/icon.svg">
+<style>
+  :root {
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    /* dark is the native theme of the brand assets */
+    --bg: #0A0F1D;
+    --bg-soft: #0D1424;
+    --card: #101A30;
+    --panel: #070B14;          /* code + terminal plates, both themes */
+    --panel-text: #DDE4F5;
+    --panel-mut: #8B94B8;
+    --plate-border: rgba(255, 255, 255, 0.11);  /* plates stay dark in both themes */
+    --border: #223052;
+    --border-soft: #1A2440;
+    --ink: #E7ECF9;
+    --mut: #A6B0CC;
+    --faint: #7C87A8;
+    --amber: #FFB224;
+    --amber-text: #FFC24D;
+    --violet: #7C5CFF;
+    --violet-text: #C0B0FF;
+    --lav: #A98BFF;
+    --red-text: #FF8B85;
+    --red-border: #7A2E2C;
+    --chip-amber-bg: rgba(255, 178, 36, 0.11);
+    --chip-violet-bg: rgba(124, 92, 255, 0.15);
+    --chip-slate-bg: rgba(148, 163, 199, 0.13);
+    --chip-slate-text: #B4BDD6;
+    --chip-red-bg: rgba(229, 72, 77, 0.13);
+    --grad-a: #FFC94D;
+    --grad-b: #FFB224;
+    --grad-c: #A98BFF;
+    --btn-ink: #1A1200;
+    --focus: #FFB224;
+    --hold-bg: #10192E;
+    --ok: #55C08A;
+    /* --yNNNN paints dots and the rail; --tNNNN is the label text, held above 4.5:1 */
+    --y2021: #7C5CFF; --y2022: #A98BFF; --y2023: #E0A24C; --y2024: #FFB224;
+    --t2021: #7C5CFF; --t2022: #A98BFF; --t2023: #E0A24C; --t2024: #FFB224;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #F6F4ED;
+      --bg-soft: #EFECE2;
+      --card: #FDFCF8;
+      --ink: #191E33;
+      --mut: #4E5670;
+      --faint: #5D6480;
+      --border: #DCD8C8;
+      --border-soft: #E5E2D5;
+      --amber: #B87A00;
+      --amber-text: #7A5300;
+      --violet: #5238C8;
+      --violet-text: #45309F;
+      --lav: #7C5CFF;
+      --red-text: #A8261E;
+      --red-border: #D9A5A1;
+      --chip-amber-bg: #F5E9CB;
+      --chip-violet-bg: #E9E4FA;
+      --chip-slate-bg: #E9E6DB;
+      --chip-slate-text: #474E66;
+      --chip-red-bg: #F7E2DF;
+      --grad-a: #A86A00;
+      --grad-b: #8A5A00;
+      --grad-c: #5238C8;
+      --btn-ink: #1A1200;
+      --focus: #5238C8;
+      --hold-bg: #FBF6E8;
+      --ok: #1E7A4D;
+      --y2021: #5238C8; --y2022: #7C5CFF; --y2023: #A06A14; --y2024: #B87A00;
+      --t2021: #4732B0; --t2022: #5B3FD0; --t2023: #8A5A00; --t2024: #7A5300;
+    }
+    :root { --panel: #10182B; --panel-text: #DDE4F5; --panel-mut: #8B94B8; }
+  }
+
+  * { box-sizing: border-box; }
+  /* scroll-padding keeps anchor targets clear of the sticky header */
+  html { scroll-behavior: smooth; scroll-padding-top: 4.75rem; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.6;
+    font-size: 1.0rem;
+    -webkit-text-size-adjust: 100%;
+    overflow-x: clip;
+  }
+  a { color: var(--amber-text); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  a:hover { text-decoration-thickness: 2px; }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; border-radius: 2px; }
+  /* plates are dark in both themes, so the ring has to stay light there */
+  .codebox :focus-visible { outline-color: var(--amber); }
+  img { max-width: 100%; height: auto; }
+  code, pre, kbd { font-family: var(--mono); }
+  p code, li code, td code, h3 code, dd code {
+    background: var(--chip-slate-bg);
+    padding: 0.08em 0.35em;
+    border-radius: 5px;
+    font-size: 0.87em;
+  }
+
+  .skip {
+    position: absolute; left: -999px; top: 0; z-index: 50;
+    background: var(--amber); color: var(--btn-ink);
+    padding: 0.5rem 1rem; border-radius: 0 0 8px 0; font-weight: 700; text-decoration: none;
+  }
+  .skip:focus { left: 0; }
+
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 0 1.25rem; }
+
+  /* ---------- header ---------- */
+  header.site {
+    position: sticky; top: 0; z-index: 20;
+    background: var(--bg);
+    background: color-mix(in srgb, var(--bg) 82%, transparent);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .site-row { display: flex; align-items: center; gap: 1rem; padding: 0.65rem 0; }
+  .brand { display: flex; flex: 0 0 auto; align-items: center; gap: 0.55rem; text-decoration: none; color: var(--ink); font-weight: 800; letter-spacing: 0.01em; }
+  .brand img { width: 30px; height: 30px; display: block; }
+  /* min-width:0 lets the nav shrink instead of pushing the header past the viewport */
+  nav.top { margin-left: auto; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+  nav.top::-webkit-scrollbar { display: none; }
+  nav.top ul { display: flex; gap: 1.1rem; list-style: none; margin: 0; padding: 0; white-space: nowrap; }
+  nav.top a { color: var(--mut); text-decoration: none; font-size: 0.86rem; font-weight: 600; }
+  nav.top a:hover { color: var(--ink); }
+
+  /* ---------- hero ---------- */
+  .hero { padding: 3.4rem 0 0.6rem; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--faint); margin: 0 0 1.1rem;
+  }
+  .eyebrow strong { color: var(--amber-text); font-weight: 700; }
+  .hero-grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 2.4rem; align-items: start; }
+  h1 {
+    font-size: clamp(2.35rem, 5.6vw, 3.9rem);
+    line-height: 1.04; letter-spacing: -0.022em; font-weight: 800;
+    margin: 0 0 1.1rem; text-wrap: balance;
+  }
+  h1 .grad {
+    background: linear-gradient(92deg, var(--grad-a), var(--grad-b) 45%, var(--grad-c));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .lede { font-size: 1.06rem; color: var(--mut); max-width: 56ch; margin: 0 0 1.6rem; text-wrap: pretty; }
+  .lede strong { color: var(--ink); }
+  .cta-row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; }
+  .btn {
+    display: inline-block; text-decoration: none; font-weight: 700; font-size: 0.95rem;
+    padding: 0.72rem 1.25rem; border-radius: 10px; border: 1px solid transparent;
+    transition: transform 0.12s ease, box-shadow 0.12s ease, background-color 0.12s ease;
+  }
+  .btn:hover { transform: translateY(-1px); }
+  .btn:active { transform: translateY(0); }
+  .btn.primary { background: var(--amber); color: var(--btn-ink); box-shadow: 0 4px 18px rgba(255, 178, 36, 0.22); }
+  .btn.ghost { color: var(--ink); border-color: var(--border); background: transparent; }
+  .btn.ghost:hover { border-color: var(--amber); }
+
+  .case {
+    border: 1px solid var(--border); border-radius: 14px; background: var(--card);
+    font-family: var(--mono); font-size: 0.8rem; overflow: hidden;
+  }
+  .case-head {
+    padding: 0.55rem 0.9rem; border-bottom: 1px solid var(--border-soft);
+    color: var(--faint); letter-spacing: 0.12em; text-transform: uppercase; font-size: 0.68rem;
+  }
+  .case dl { margin: 0; padding: 0.35rem 0; }
+  .case .row { display: flex; gap: 0.8rem; padding: 0.42rem 0.9rem; align-items: baseline; }
+  .case .row + .row { border-top: 1px dashed var(--border-soft); }
+  .case dt { flex: 0 0 7.2em; color: var(--faint); margin: 0; }
+  .case dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
+  .case dd.held { color: var(--amber-text); font-weight: 700; }
+  .case dd.late { color: var(--red-text); }
+
+  .banner { margin: 2.3rem 0 0; }
+  .banner img {
+    display: block; width: 100%; border-radius: 16px;
+    border: 1px solid var(--plate-border); background: var(--panel);
+  }
+  .banner figcaption { font-size: 0.78rem; color: var(--faint); margin-top: 0.55rem; font-family: var(--mono); }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.8rem; margin: 1.9rem 0 0; padding: 0; list-style: none; }
+  .stats li { border: 1px solid var(--border-soft); border-radius: 12px; padding: 0.85rem 1rem; background: var(--card); }
+  .stats .n { display: block; font-weight: 800; font-size: 1.55rem; letter-spacing: -0.02em; }
+  .stats .n.amber { color: var(--amber-text); }
+  .stats small { color: var(--faint); font-size: 0.78rem; line-height: 1.35; display: block; margin-top: 0.15rem; }
+
+  /* ---------- sections ---------- */
+  section { padding: 4.2rem 0 0; }
+  .sec-eyebrow { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.16em; text-transform: uppercase; color: var(--amber-text); margin: 0 0 0.5rem; }
+  h2 { font-size: clamp(1.6rem, 3.4vw, 2.3rem); letter-spacing: -0.018em; line-height: 1.12; margin: 0 0 0.9rem; text-wrap: balance; }
+  h3 { font-size: 1.12rem; margin: 1.8rem 0 0.5rem; letter-spacing: -0.01em; }
+  .sec-intro { color: var(--mut); max-width: 68ch; margin: 0 0 1.6rem; }
+  .dots { display: inline-flex; align-items: center; gap: 7px; margin: 0.3rem 0 0.9rem; }
+  .dots i { border-radius: 50%; display: block; }
+  .dots i:nth-child(1) { width: 6px;  height: 6px;  background: var(--y2021); opacity: 0.7; }
+  .dots i:nth-child(2) { width: 8px;  height: 8px;  background: var(--y2022); opacity: 0.85; }
+  .dots i:nth-child(3) { width: 10px; height: 10px; background: var(--y2023); }
+  .dots i:nth-child(4) { width: 12px; height: 12px; background: var(--y2024); }
+
+  /* ---------- timeline ---------- */
+  .tl { list-style: none; margin: 2rem 0 0; padding: 0; position: relative; }
+  .tl::before {
+    content: ""; position: absolute; left: 148px; top: 6px; bottom: 6px; width: 2px;
+    background: linear-gradient(180deg, var(--y2021), var(--y2022) 38%, var(--y2023) 70%, var(--y2024));
+    opacity: 0.5;
+  }
+  .tl > li { position: relative; padding: 0 0 1.15rem 0; }
+  .tl-year {
+    font-family: var(--mono); font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
+    font-size: 0.78rem; padding: 1.2rem 0 0.9rem; display: grid;
+    grid-template-columns: 128px 40px 1fr; align-items: center;
+  }
+  .tl-year .y { text-align: right; }
+  .tl-year .marker { width: 12px; height: 12px; border-radius: 50%; margin: 0 auto; }
+  .tl-year.y21 { color: var(--t2021); } .tl-year.y21 .marker { background: var(--y2021); }
+  .tl-year.y22 { color: var(--t2022); } .tl-year.y22 .marker { background: var(--y2022); }
+  .tl-year.y23 { color: var(--t2023); } .tl-year.y23 .marker { background: var(--y2023); }
+  .tl-year.y24 { color: var(--t2024); } .tl-year.y24 .marker { background: var(--y2024); }
+  .tl-ev { display: grid; grid-template-columns: 128px 40px 1fr; gap: 0; }
+  .tl-ev .when { text-align: right; font-family: var(--mono); font-size: 0.76rem; color: var(--faint); padding-top: 0.35rem; }
+  .tl-ev .dot { position: relative; }
+  .tl-ev .dot i {
+    position: absolute; left: 50%; top: 0.55rem; transform: translateX(-50%);
+    width: 9px; height: 9px; border-radius: 50%; background: var(--faint);
+    box-shadow: 0 0 0 4px var(--bg);
+  }
+  .tl-ev.op   .dot i { background: var(--amber); }
+  .tl-ev.sock .dot i { background: var(--lav); }
+  .tl-ev.bad  .dot i { background: #E5484D; }
+  .tl-body {
+    border: 1px solid var(--border-soft); border-radius: 12px; background: var(--card);
+    padding: 0.8rem 1rem 0.85rem;
+  }
+  .tl-ev.bad .tl-body { border-color: var(--red-border); }
+  .tl-top { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-bottom: 0.3rem; }
+  .chip {
+    font-family: var(--mono); font-size: 0.68rem; font-weight: 700; letter-spacing: 0.05em;
+    padding: 0.16rem 0.55rem; border-radius: 999px; white-space: nowrap;
+  }
+  .chip.amber { background: var(--chip-amber-bg); color: var(--amber-text); }
+  .chip.violet { background: var(--chip-violet-bg); color: var(--violet-text); }
+  .chip.slate { background: var(--chip-slate-bg); color: var(--chip-slate-text); }
+  .chip.red { background: var(--chip-red-bg); color: var(--red-text); }
+  .kind { font-family: var(--mono); font-size: 0.68rem; color: var(--faint); }
+  .tl-body p { margin: 0.15rem 0 0; font-size: 0.92rem; color: var(--mut); }
+  .tl-body p strong { color: var(--ink); }
+  .tl-body blockquote {
+    margin: 0.45rem 0 0.2rem; padding: 0.1rem 0 0.1rem 0.8rem;
+    border-left: 3px solid var(--border); color: var(--ink); font-size: 0.92rem; font-style: italic;
+  }
+  .src { font-family: var(--mono); font-size: 0.7rem; }
+  .src a { color: var(--faint); }
+  .src a:hover { color: var(--amber-text); }
+
+  .tl-note .tl-body {
+    background: transparent; border: 1px dashed var(--border);
+    border-left: 3px solid var(--amber);
+  }
+  .tl-note .lbl { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.13em; text-transform: uppercase; color: var(--amber-text); display: block; margin-bottom: 0.25rem; }
+  .tl-note p { color: var(--mut); }
+
+  .hold-card {
+    border: 1px solid var(--amber); border-radius: 14px; background: var(--hold-bg);
+    padding: 1.3rem 1.4rem; margin: 0.4rem 0 0.8rem;
+    box-shadow: 0 6px 30px rgba(255, 178, 36, 0.10);
+  }
+  .hold-head { display: flex; align-items: center; gap: 0.7rem; margin-bottom: 0.5rem; }
+  .hold-head svg { flex: 0 0 auto; }
+  .hold-head .t { font-weight: 800; font-size: 1.25rem; letter-spacing: -0.01em; }
+  .hold-card p { margin: 0.4rem 0 0; color: var(--mut); font-size: 0.95rem; }
+  .hold-card p strong { color: var(--ink); }
+  .hold-meta { font-family: var(--mono); font-size: 0.74rem; color: var(--amber-text); margin-top: 0.75rem; }
+
+  .coda .tl-body { opacity: 0.92; }
+
+  .tl-foot { font-size: 0.8rem; color: var(--faint); font-family: var(--mono); margin: 0.6rem 0 0; max-width: 74ch; }
+  .tl-foot + .tl-foot { margin-top: 0.35rem; }
+  .tl-foot code, .run-note code, .hold-meta code { white-space: nowrap; }
+
+  /* ---------- memory section ---------- */
+  .pull {
+    border-left: 4px solid var(--amber); padding: 0.4rem 0 0.4rem 1.2rem; margin: 1.8rem 0;
+    font-size: clamp(1.12rem, 2.4vw, 1.45rem); line-height: 1.4; letter-spacing: -0.01em;
+    color: var(--ink); max-width: 62ch; font-weight: 600;
+  }
+  .pull .q { color: var(--amber-text); }
+  .duo { display: grid; grid-template-columns: 1fr 1fr; gap: 1.1rem; margin-top: 1.4rem; }
+  .panel {
+    border: 1px solid var(--border); border-radius: 14px; background: var(--card);
+    padding: 1.15rem 1.25rem; display: flex; flex-direction: column;
+  }
+  .panel h3 { margin-top: 0; }
+  .panel .sub { font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.13em; text-transform: uppercase; color: var(--faint); display: block; margin-bottom: 0.35rem; }
+  .review-sim { border: 1px solid var(--border-soft); border-radius: 10px; overflow: hidden; margin: 0.7rem 0; font-family: var(--mono); font-size: 0.78rem; }
+  .review-sim .rrow { padding: 0.5rem 0.8rem; border-bottom: 1px solid var(--border-soft); overflow-wrap: anywhere; }
+  .review-sim .rrow:last-child { border-bottom: 0; }
+  .review-sim .ok { color: var(--ok); font-weight: 700; }
+  .panel ul { margin: 0.6rem 0 0; padding-left: 1.15rem; color: var(--mut); font-size: 0.93rem; }
+  .panel ul li { margin: 0.45rem 0; }
+  .panel ul li strong { color: var(--ink); }
+  /* margin-top:auto pins the caption to the bottom, so side-by-side panels of
+     unequal content length do not leave one with a hole under its text */
+  .panel .cap { font-size: 0.8rem; color: var(--faint); margin: 0.9rem 0 0; margin-top: auto; padding-top: 0.9rem; }
+
+  .gate { margin-top: 1.6rem; }
+  .bars { margin: 1rem 0 0.4rem; display: grid; gap: 0.65rem; max-width: 620px; }
+  .bar-row { display: grid; grid-template-columns: minmax(120px, 190px) 1fr; gap: 0.7rem; align-items: center; font-size: 0.82rem; }
+  .bar-row .lbl { color: var(--mut); font-family: var(--mono); font-size: 0.74rem; text-align: right; }
+  .bar-track { background: var(--chip-slate-bg); border-radius: 999px; height: 14px; position: relative; }
+  .bar-fill { height: 100%; border-radius: 999px; }
+  .bar-fill.take { width: 34%; background: linear-gradient(90deg, var(--grad-b), var(--grad-a)); }
+  .bar-fill.ben { width: 78%; background: var(--violet); opacity: 0.75; }
+  .bar-note { font-family: var(--mono); font-size: 0.72rem; color: var(--faint); }
+  .verdict { display: inline-block; margin-top: 0.7rem; font-family: var(--mono); font-size: 0.78rem; font-weight: 700; color: var(--amber-text); border: 1px solid var(--amber); border-radius: 999px; padding: 0.28rem 0.8rem; }
+  .gate-foot { margin-top: 1.3rem; }
+
+  /* ---------- architecture ---------- */
+  ol.flow { list-style: none; display: flex; flex-wrap: wrap; gap: 0.55rem; padding: 0; margin: 1.6rem 0 0.4rem; align-items: stretch; counter-reset: fl; }
+  ol.flow li { display: flex; align-items: center; gap: 0.55rem; min-width: 0; }
+  ol.flow li .node {
+    border: 1px solid var(--border); background: var(--card); border-radius: 10px;
+    padding: 0.5rem 0.75rem; font-size: 0.78rem; line-height: 1.35; color: var(--mut);
+  }
+  ol.flow li .node b { color: var(--ink); display: block; font-size: 0.8rem; }
+  /* the arrow leads each node, so a wrapped row starts with "→" instead of
+     ending on one that points at nothing */
+  ol.flow li:not(:first-child)::before { content: "→"; color: var(--faint); font-weight: 700; }
+  .stage { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: 1.4rem; padding: 1.5rem 0; border-top: 1px solid var(--border-soft); margin-top: 1.5rem; }
+  .stage:first-of-type { border-top: 0; }
+  .stage .num { font-family: var(--mono); color: var(--amber-text); font-size: 0.78rem; letter-spacing: 0.12em; }
+  .stage h3 { margin: 0.25rem 0 0.5rem; }
+  .stage p { color: var(--mut); font-size: 0.93rem; margin: 0.4rem 0; }
+  .stage p strong { color: var(--ink); }
+
+  .codebox { border-radius: 12px; overflow: hidden; border: 1px solid var(--plate-border); background: var(--panel); }
+  .codebox .cb-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 0.8rem;
+    padding: 0.45rem 0.9rem; font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--panel-mut); border-bottom: 1px solid rgba(255,255,255,0.07);
+  }
+  .codebox pre { margin: 0; padding: 0.9rem 1rem; overflow-x: auto; font-size: 0.75rem; line-height: 1.6; color: var(--panel-text); }
+  .codebox .cm { color: var(--panel-mut); }
+  .codebox .kw { color: #9FB6FF; }
+  .codebox .hl { color: #FFB224; font-weight: 700; }
+  .codebox .pr { color: #6E7A9E; user-select: none; }
+  .copy {
+    font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.08em; cursor: pointer;
+    background: rgba(255,255,255,0.06); color: #C9D2EA; border: 1px solid rgba(255,255,255,0.14);
+    border-radius: 7px; padding: 0.25rem 0.6rem;
+  }
+  .copy:hover { background: rgba(255,255,255,0.12); }
+
+  .acid {
+    margin-top: 2rem; border: 1px solid var(--border); border-left: 4px solid var(--violet);
+    border-radius: 12px; background: var(--card); padding: 1.1rem 1.3rem; max-width: 76ch;
+  }
+  .acid p { margin: 0.3rem 0; color: var(--mut); font-size: 0.94rem; }
+  .acid p strong { color: var(--ink); }
+
+  /* ---------- stack ---------- */
+  .stack-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.1rem; margin-top: 1.5rem; }
+  .stack-card { border: 1px solid var(--border); border-radius: 14px; background: var(--card); padding: 1.2rem 1.3rem; }
+  .stack-card h3 { margin: 0 0 0.2rem; }
+  .stack-card .sub { font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--faint); }
+  .stack-card dl { margin: 0.9rem 0 0; }
+  .stack-card dt { font-weight: 700; margin-top: 0.9rem; }
+  .stack-card dd { margin: 0.25rem 0 0; color: var(--mut); font-size: 0.9rem; }
+  .status { font-family: var(--mono); font-size: 0.66rem; font-weight: 700; letter-spacing: 0.07em; border-radius: 999px; padding: 0.14rem 0.5rem; vertical-align: 1px; white-space: nowrap; }
+  .status.live { background: var(--chip-amber-bg); color: var(--amber-text); }
+  .status.pending { background: var(--chip-slate-bg); color: var(--chip-slate-text); }
+
+  /* ---------- run ---------- */
+  .run-note { border: 1px dashed var(--border); border-radius: 10px; padding: 0.8rem 1rem; color: var(--mut); font-size: 0.88rem; margin: 1rem 0 0; max-width: 76ch; }
+  .run-note strong { color: var(--ink); }
+  #run .codebox { margin-top: 0.8rem; }
+  #run h3 { margin-top: 2.1rem; }
+  #run h3 .mono-tag { font-family: var(--mono); font-weight: 400; color: var(--faint); font-size: 0.8rem; }
+
+  /* ---------- ledger ---------- */
+  .ledger-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.1rem; margin-top: 1.5rem; }
+  .ledger-card { border: 1px solid var(--border); border-radius: 14px; background: var(--card); padding: 1.15rem 1.25rem; }
+  .ledger-card h3 { margin: 0 0 0.6rem; font-size: 1rem; }
+  .ledger-card ul { margin: 0; padding-left: 1.1rem; color: var(--mut); font-size: 0.88rem; }
+  .ledger-card ul li { margin: 0.5rem 0; }
+  .ledger-card ul li strong { color: var(--ink); }
+  .judge { margin-top: 2.4rem; }
+  .judge table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+  .judge-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; }
+  .judge th, .judge td { text-align: left; padding: 0.6rem 0.9rem; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+  .judge tr:last-child td { border-bottom: 0; }
+  .judge th { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint); background: var(--bg-soft); }
+  .judge td:first-child { font-weight: 700; white-space: nowrap; }
+  .judge td { color: var(--mut); }
+  .tiebreak { font-family: var(--mono); font-size: 0.66rem; color: var(--amber-text); border: 1px solid var(--amber); border-radius: 999px; padding: 0.08rem 0.45rem; white-space: nowrap; }
+
+  /* ---------- footer ---------- */
+  footer.site { border-top: 1px solid var(--border-soft); margin-top: 4rem; padding: 2.2rem 0 3rem; }
+  footer .cols { display: grid; grid-template-columns: 1.3fr 1fr; gap: 2rem; }
+  footer h2 { font-size: 0.95rem; margin: 0 0 0.6rem; }
+  footer p, footer li { color: var(--faint); font-size: 0.84rem; }
+  footer ul { margin: 0; padding-left: 1.1rem; }
+  footer ul li { margin: 0.3rem 0; overflow-wrap: anywhere; }
+  footer .fin { margin-top: 2rem; font-family: var(--mono); font-size: 0.74rem; color: var(--faint); }
+
+  /* ---------- reveal (JS-gated) ---------- */
+  @media (prefers-reduced-motion: no-preference) {
+    .js .reveal { opacity: 0; transform: translateY(12px); transition: opacity 0.5s ease, transform 0.5s ease; }
+    .js .reveal.in { opacity: 1; transform: none; }
+  }
+
+  /* ---------- responsive ---------- */
+  @media (max-width: 880px) {
+    .hero-grid { grid-template-columns: 1fr; }
+    .duo, .stack-grid { grid-template-columns: 1fr; }
+    .ledger-grid { grid-template-columns: 1fr; }
+    .stage { grid-template-columns: 1fr; gap: 0.8rem; }
+    footer .cols { grid-template-columns: 1fr; }
+    ol.flow { flex-direction: column; align-items: stretch; }
+    ol.flow li { flex-direction: column; align-items: stretch; }
+    ol.flow li:not(:first-child)::before { content: "↓"; text-align: center; }
+  }
+  @media (max-width: 760px) {
+    nav.top ul { gap: 0.85rem; }
+    nav.top a { font-size: 0.8rem; }
+    .site-row { gap: 0.6rem; }
+    /* fade the cut edge so the horizontal scroll reads as intentional */
+    nav.top { mask-image: linear-gradient(90deg, #000 calc(100% - 26px), transparent); }
+  }
+  @media (max-width: 640px) {
+    .tl::before { left: 10px; }
+    .tl-year, .tl-ev { grid-template-columns: 1fr; }
+    .tl-year { display: flex; align-items: center; gap: 0.6rem; padding-left: 0; }
+    .tl-year .y { text-align: left; order: 2; }
+    .tl-year .marker { order: 1; margin: 0 0 0 5px; flex: 0 0 auto; }
+    .tl-year span:last-child { order: 3; }
+    .tl-year span:last-child::before { content: "· "; color: var(--faint); }
+    .tl-ev { padding-left: 26px; position: relative; }
+    .tl-ev .when { text-align: left; padding: 0 0 0.25rem; }
+    .tl-ev .dot { position: absolute; left: 0; top: 0; height: 100%; width: 20px; }
+    .tl-ev .dot i { left: 11px; top: 0.45rem; }
+    .bar-row { grid-template-columns: 1fr; gap: 0.25rem; }
+    .bar-row .lbl { text-align: left; }
+    .tl-ev, .tl-body { min-width: 0; }
+  }
+  /* below ~430px the nowrap pills and command chips are wider than their column,
+     and body overflow is clipped rather than scrollable — so let them wrap */
+  @media (max-width: 430px) {
+    /* a pill that wraps mid-word looks broken, so it becomes a squarer tag block */
+    .chip, .status { white-space: normal; display: inline-block; border-radius: 7px; }
+    .status { font-size: 0.62rem; }
+    .hold-meta code, .run-note code, .tl-foot code { white-space: normal; }
+  }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="site">
+  <div class="wrap site-row">
+    <a class="brand" href="#top" aria-label="Sleeper — back to top">
+      <img src="assets/icon.svg" alt="" width="30" height="30">
+      <span>Sleeper</span>
+    </a>
+    <nav class="top" aria-label="Sections">
+      <ul>
+        <li><a href="#timeline">The arc</a></li>
+        <li><a href="#memory">What memory sees</a></li>
+        <li><a href="#architecture">Architecture</a></li>
+        <li><a href="#stack">CockroachDB &times; AWS</a></li>
+        <li><a href="#run">Run it</a></li>
+        <li><a href="#ledger">Honest ledger</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+  <!-- ============ HERO ============ -->
+  <section class="hero" id="top" aria-labelledby="hero-h">
+    <div class="wrap">
+      <p class="eyebrow"><strong>Sleeper</strong> &middot; release-gate agent &middot; CockroachDB &times; AWS Agentic Memory Hackathon</p>
+      <div class="hero-grid">
+        <div>
+          <h1 id="hero-h">The release gate that <span class="grad">remembers.</span></h1>
+          <p class="lede">
+            The xz-utils backdoor was planted over 28 months — one innocuous commit, one plausible
+            email at a time. <strong>No code review caught it, because no review sees 28 months at
+            once.</strong> Sleeper keeps every commit, email and maintainer change for a package in
+            CockroachDB. When a release matches the shape of a slow takeover, it holds that release
+            — one transaction, full audit trail.
+          </p>
+          <div class="cta-row">
+            <a class="btn primary" href="#timeline">Walk the takeover arc</a>
+            <a class="btn ghost" href="#run">Run the replay yourself</a>
+          </div>
+        </div>
+        <div class="case" role="group" aria-label="Case file: the xz incident">
+          <div class="case-head">Case file &middot; from the public record</div>
+          <dl>
+            <div class="row"><dt>package</dt><dd>xz-utils — a compression library on essentially every Linux machine</dd></div>
+            <div class="row"><dt>cve</dt><dd><a href="https://nvd.nist.gov/vuln/detail/CVE-2024-3094" target="_blank" rel="noopener noreferrer">CVE-2024-3094</a> &middot; CVSS 10.0</dd></div>
+            <div class="row"><dt>planted</dt><dd>&asymp; Oct 2021 &rarr; Feb 2024 — 28 months</dd></div>
+            <div class="row"><dt>found</dt><dd class="late">2024-03-29 — five weeks after it shipped, via 500&nbsp;ms of SSH latency. Luck, not process.</dd></div>
+            <div class="row"><dt>in replay</dt><dd class="held">HELD at the 5.6.0 upload</dd></div>
+          </dl>
+        </div>
+      </div>
+
+      <figure class="banner">
+        <img src="assets/readme-hero-animated.svg" width="1280" height="320"
+             alt="Animated diagram: three years of xz-utils events stream along a 2021-to-2024 rail into a CockroachDB vector index, a 90-day arc is matched against a takeover playbook, and the release gate closes on xz 5.6.0.">
+        <figcaption>The loop: events stream in for years &rarr; the arc is matched against known takeover shapes &rarr; the gate holds the release.</figcaption>
+      </figure>
+
+      <ul class="stats" aria-label="The incident and the response, in numbers">
+        <li><span class="n">28 mo</span><small>to plant the backdoor, one clean commit at a time</small></li>
+        <li><span class="n">25</span><small>events in the replayed timeline, each publicly cited</small></li>
+        <li><span class="n">0</span><small>of them suspicious alone — the tell lives only in the arc</small></li>
+        <li><span class="n amber">1</span><small>transaction to hold the release: all four writes or none</small></li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ============ TIMELINE ============ -->
+  <section id="timeline" aria-labelledby="timeline-h">
+    <div class="wrap">
+      <p class="sec-eyebrow">01 &middot; The incident</p>
+      <h2 id="timeline-h">28 months of clean reviews</h2>
+      <div class="dots" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+      <p class="sec-intro">
+        The arc Sleeper replays — 18 of the 25 events in <code>data/xz-timeline.json</code>,
+        reconstructed from the public record and cited per event. Read each one the way its reviewer
+        did: alone, on the day it happened. Every one passed.
+      </p>
+
+      <ol class="tl">
+        <li class="tl-year y21"><span class="y">2021</span><span class="marker" aria-hidden="true"></span><span>the stage</span></li>
+
+        <li class="reveal"><div class="tl-ev">
+          <div class="when">&asymp; 2021-06-15</div><div class="dot" aria-hidden="true"><i></i></div>
+          <div class="tl-body">
+            <div class="tl-top"><span class="chip slate">Lasse Collin &middot; maintainer</span><span class="kind">commit</span></div>
+            <p>One unpaid volunteer: irregular solo maintenance, a years-long backlog of unreviewed mailing-list patches — on a library nearly every Linux system links.</p>
+            <p class="src"><a href="https://github.com/tukaani-project/xz/commits/master" target="_blank" rel="noopener noreferrer">source: tukaani-project/xz history</a></p>
+          </div>
+        </div></li>
+
+        <li class="reveal"><div class="tl-ev op">
+          <div class="when">&asymp; 2021-10-29</div><div class="dot" aria-hidden="true"><i></i></div>
+          <div class="tl-body">
+            <div class="tl-top"><span class="chip amber">&ldquo;Jia Tan&rdquo;</span><span class="kind">email &middot; first activity</span></div>
+            <p>The account's first recorded public activity: small, correct, unremarkable contributions. Nothing objectionable — <strong>the account simply has no history before this date.</strong> Tenure starts counting here.</p>
+            <p class="src"><a href="https://research.swtch.com/xz-timeline" target="_blank" rel="noopener noreferrer">source: research.swtch.com/xz-timeline</a></p>
+          </div>
+        </div></li>
+
+        <li class="tl-year y22"><span class="y">2022</span><span class="marker" aria-hidden="true"></span><span>the squeeze</span></li>
+
+        <li class="reveal"><div class="tl-ev op">
+          <div class="when">2022-04-19</div><div class="dot" aria-hidden="true"><i></i></div>
+          <div class="tl-body">
+            <div class="tl-top"><span class="chip amber">&ldquo;Jia Tan&rdquo;</span><span class="kind">email</span></div>
+            <p>First patch to the xz-devel list: small, plausible, technically competent. The maintainer engages normally.</p>
+            <p class="src"><a href="https://www.mail-archive.com/xz-devel@tukaani.org/msg00559.html" target="_blank" rel="noopener noreferrer">source: xz-devel archive</a></p>
+          </div>
+        </div></li>
+
+        <li class="reveal"><div class="tl-ev sock">
+          <div class="when">2022-04-22</div><div class="dot" aria-hidden="true"><i></i></div>
+          <div class="tl-body">
+            <div class="tl-top"><span class="chip violet">&ldquo;Jigar Kumar&rdquo; &middot; no prior history</span><span class="kind">email</span></div>
+            <p>Three days later, another account with no history appears — and its <strong>first-ever message is about maintainership, not code</strong>: schedule pressure over unmerged patches.</p>
+            <p class="src"><a href="https://www.mail-archive.com/xz-devel@tukaani.org/msg00563.html" target="_blank" rel="noopener noreferrer">source: xz-devel archive</a></p>
+          </div>
+        </div></li>
+
+        <li class="reveal"><div class="tl-ev sock">
+          <div class="when">2022-05-19</div><div class="dot" aria-hidden="true"><i></i></div>
+          <div class="tl-body">
+            <div class="tl-top"><span class="chip violet">&ldquo;Jigar Kumar&rdquo;</span><span class="kind">email</span></div>
+            <blockquote>&ldquo;Patches spend years on this mailing list. 5.2.0 was released in 2015. There is no reason to think anything is coming soon.&rdquo;</blockquote>
+            <p>A complaint about the maintainer's throughput, from an account that has contributed no patches of its own.</p>
+            <p class="src"><a href="https://www.mail-archive.com/xz-devel@tukaani.org/msg00566.html" target="_blank" rel="noopener noreferrer">source: xz-devel archive</a></p>
+          </div>
+        </div></li>
+
+        <li class="reveal"><div class="tl-ev sock">
+          <div class="when">2022-06-07</div><div class="dot" aria-hidden="true"><i></i></div>
+          <div class="tl-body">
+            <div class="tl-top"><span class="chip violet">&ldquo;Jigar Kumar&rdquo;</span><span class="kind">email</span></div>
+            <blockquote>&ldquo;Progress will not happen until there is new maintainer. &hellip; Why delay what your repo needs?&rdquo;</blockquote>
+            <p>The handover is now demanded outright. Still zero code from this account.</p>
+            <p class="src"><a href="https://www.mail-archive.com/xz-devel@tukaani.org/msg00568.html" target="_blank" rel="noopener noreferrer">source: xz-devel archive</a></p>
+          </div>
+        </div></li>
+
+        <li class="reveal"><div class="tl-ev">
+          <div class="when">2022-06-08</div><div class="dot" aria-hidden="true"><i></i></div>
+          <div class="tl-body">
+            <div class="tl-top"><span class="chip slate">Lasse Collin &middot; maintainer</span><span class="kind">email</span></div>
+            <blockquote>&ldquo;I haven't lost interest but my ability to care has been fairly limited mostly due to longterm mental health issues &hellip; Jia Tan has helped me off-list with xz and he might have a bigger role in the future at least with xz Utils.&rdquo;</blockquote>
+            <p>Under pressure, a tired and under-resourced maintainer names a successor in public.</p>
+            <p class="src"><a href="https://www.mail-archive.com/xz-devel@tukaani.org/msg00567.html" target="_blank" rel="noopener noreferrer">source: xz-devel archive</a></p>
+          </div>
+        </div></li>
+
+        <li class="reveal"><div class="tl-ev sock">
+          <div class="when">2022-06-14</div><div class="dot" aria-hidden="true"><i></i></div>
+          <div class="tl-body">
+            <div class="tl-top"><span class="chip violet">&ldquo;Dennis Ens&rdquo; &middot; no prior history</span><span class="kind">email</span></div>
+            <p>A second no-history account joins on the same theme. <strong>Two independent-looking voices now push the same handover</strong>, weeks apart.</p>
+            <p class="src"><a href="https://www.mail-archive.com/xz-devel@tukaani.org/msg00570.html" target="_blank" rel="noopener noreferrer">source: xz-devel archive</a></p>
+          </div>
+        </div></li>
+
+        <li class="reveal"><div class="tl-ev sock">
+          <div class="when">2022-06-21</div><div class="dot" aria-hidden="true"><i></i></div>
+          <div class="tl-body">
+            <div class="tl-top"><span class="chip violet">&ldquo;Jigar Kumar&rdquo;</span><span class="kind">last email</span></div>
+            <p>Final recorded message, still on the maintainership theme. With the handover trajectory set, the account goes silent — <strong>and is never seen in any project again.</strong></p>
+            <p class="src"><a href="https://www.mail-archive.com/xz-devel@tukaani.org/msg00571.html" target="_blank" rel="noopener noreferrer">source: xz-devel archive</a></p>
+          </div>
+        </div></li>
+
+        <li class="tl-note reveal"><div class="tl-ev">
+          <div class="when" aria-hidden="true"></div><div class="dot" aria-hidden="true"></div>
+          <div class="tl-body">
+            <span class="lbl">What the arc holds at this point</span>
+            <p>Two accounts whose only activity is demanding a handover. Zero code from either. A burned-out maintainer naming a successor. Read alone, every message was fine — the pattern is not inside any single event.</p>
+          </div>
+        </div></li>
+
+        <li class="reveal"><div class="tl-ev op">
+          <div class="when">&asymp; 2022-11-30</div><div class="dot" aria-hidden="true"><i></i></div>
+          <div class="tl-body">
+            <div class="tl-top"><span class="chip amber">&ldquo;Jia Tan&rdquo;</span><span class="kind">maintainer change</span></div>
+            <p>Commit access granted; self-merged commits follow shortly, without external review. From first-ever public activity to write access on near-universal infrastructure: <strong>roughly 13 months.</strong></p>
+            <p class="src"><a href="https://github.com/tukaani-project/xz/commits/master" target="_blank" rel="noopener noreferrer">source: tukaani-project/xz history</a></p>
+          </div>
+        </div></li>
+
+        <li class="tl-year y23"><span class="y">2023</span><span class="marker" aria-hidden="true"></span><span>the takeover</span></li>
+
+        <li class="reveal"><div class="tl-ev op">
+          <div class="when">2023-03-20</div><div class="dot" aria-hidden="true"><i></i></div>
+          <div class="tl-body">
+            <div class="tl-top"><span class="chip amber">&ldquo;Jia Tan&rdquo;</span><span class="kind">maintainer change</span></div>
+            <p>The oss-fuzz contact for xz is switched to a JiaT75-controlled address. <strong>Automated security reports now route away from the original maintainer.</strong></p>
+            <p class="src"><a href="https://github.com/google/oss-fuzz/pull/10667" target="_blank" rel="noopener noreferrer">source: google/oss-fuzz</a></p>
+          </div>
+        </div></li>
+
+        <li class="reveal"><div class="tl-ev op">
+          <div class="when">&asymp; 2023-05-04</div><div class="dot" aria-hidden="true"><i></i></div>
+          <div class="tl-body">
+            <div class="tl-top"><span class="chip amber">&ldquo;Jia Tan&rdquo;</span><span class="kind">release</span></div>
+            <p>Signs and publishes a release as acting release manager. <strong>Tarball production — the step that will later carry the backdoor — is now under this actor's control.</strong></p>
+            <p class="src"><a href="https://github.com/tukaani-project/xz/releases" target="_blank" rel="noopener noreferrer">source: xz releases</a></p>
+          </div>
+        </div></li>
+
+        <li class="reveal"><div class="tl-ev sock">
+          <div class="when">2023-06-27</div><div class="dot" aria-hidden="true"><i></i></div>
+          <div class="tl-body">
+            <div class="tl-top"><span class="chip violet">&ldquo;Hans Jansen&rdquo; &middot; no meaningful history</span><span class="kind">commit</span></div>
+            <p>Contributes IFUNC resolver machinery to <code>crc64_fast.c</code>. Defensible on performance grounds, merged — and precisely the mechanism the backdoor will use to hook symbol resolution at runtime.</p>
+            <p class="src"><a href="https://github.com/tukaani-project/xz/commit/ee44863ae88e377a5df10db007ba9bfadde3d314" target="_blank" rel="noopener noreferrer">source: commit ee44863</a></p>
+          </div>
+        </div></li>
+
+        <li class="reveal"><div class="tl-ev op">
+          <div class="when">2023-07-08</div><div class="dot" aria-hidden="true"><i></i></div>
+          <div class="tl-body">
+            <div class="tl-top"><span class="chip amber">&ldquo;Jia Tan&rdquo;</span><span class="kind">commit</span></div>
+            <p>A pull request to oss-fuzz disables IFUNC-related detection for xz, justified as suppressing false positives. <strong>The fuzzer most likely to notice anomalous IFUNC behaviour stops looking.</strong></p>
+            <p class="src"><a href="https://github.com/google/oss-fuzz/pull/10667" target="_blank" rel="noopener noreferrer">source: google/oss-fuzz</a></p>
+          </div>
+        </div></li>
+
+        <li class="reveal"><div class="tl-ev op">
+          <div class="when">&asymp; 2023-07-19</div><div class="dot" aria-hidden="true"><i></i></div>
+          <div class="tl-body">
+            <div class="tl-top"><span class="chip amber">&ldquo;Jia Tan&rdquo;</span><span class="kind">commit</span></div>
+            <p>Landlock sandboxing is disabled through a deliberately malformed configure check — reads as a build-system quirk in isolation, removes a hardening layer in practice.</p>
+            <p class="src"><a href="https://github.com/tukaani-project/xz/commits/master" target="_blank" rel="noopener noreferrer">source: tukaani-project/xz history</a></p>
+          </div>
+        </div></li>
+
+        <li class="tl-note reveal"><div class="tl-ev">
+          <div class="when" aria-hidden="true"></div><div class="dot" aria-hidden="true"></div>
+          <div class="tl-body">
+            <span class="lbl">What the arc holds at this point</span>
+            <p>The actor now signs the releases, receives the project's security reports, and has switched off the fuzzer's eyes. Each change was individually defensible. The concentration on build machinery rather than library code is visible only in aggregate.</p>
+          </div>
+        </div></li>
+
+        <li class="tl-year y24"><span class="y">2024</span><span class="marker" aria-hidden="true"></span><span>the payload</span></li>
+
+        <li class="reveal"><div class="tl-ev bad">
+          <div class="when">2024-02-23</div><div class="dot" aria-hidden="true"><i></i></div>
+          <div class="tl-body">
+            <div class="tl-top"><span class="chip amber">&ldquo;Jia Tan&rdquo;</span><span class="chip red">payload</span><span class="kind">commit</span></div>
+            <blockquote>&ldquo;Tests: Add a few test files.&rdquo;</blockquote>
+            <p>Two binary blobs land as test-suite corpus files. They are the encrypted payload stages of the backdoor. <strong>Binary test fixtures are conventionally not read by reviewers.</strong></p>
+            <p class="src"><a href="https://github.com/tukaani-project/xz/commit/cf44e4b7f5dfdbf8c78aef377c10f71e274f63c0" target="_blank" rel="noopener noreferrer">source: commit cf44e4b</a></p>
+          </div>
+        </div></li>
+
+        <li class="reveal"><div class="tl-ev bad">
+          <div class="when">2024-02-24</div><div class="dot" aria-hidden="true"><i></i></div>
+          <div class="tl-body">
+            <div class="tl-top"><span class="chip amber">&ldquo;Jia Tan&rdquo;</span><span class="chip red">5.6.0 ships</span><span class="kind">release</span></div>
+            <p>The 5.6.0 tarball is published. Its <code>build-to-host.m4</code> differs from the repository: the loader stage exists <strong>only in the distributed tarball, never in the git history</strong> — so no amount of reviewing the repo can find it.</p>
+            <p class="src"><a href="https://www.openwall.com/lists/oss-security/2024/03/29/4" target="_blank" rel="noopener noreferrer">source: oss-security disclosure</a></p>
+          </div>
+        </div></li>
+
+        <li class="reveal"><div class="tl-ev">
+          <div class="when" aria-hidden="true"></div><div class="dot" aria-hidden="true"></div>
+          <div class="hold-card">
+            <div class="hold-head">
+              <svg width="34" height="34" viewBox="0 0 512 512" aria-hidden="true">
+                <circle cx="256" cy="256" r="146" fill="none" stroke="var(--amber)" stroke-width="26"/>
+                <rect x="206" y="196" width="38" height="120" rx="19" fill="var(--amber)"/>
+                <rect x="268" y="196" width="38" height="120" rx="19" fill="var(--amber)"/>
+              </svg>
+              <span class="t">Sleeper holds here.</span>
+            </div>
+            <p>
+              Replayed through the agent, the arc — the actor's whole trajectory
+              <strong>read back out of CockroachDB, never out of the seed file</strong>, with the last
+              90 days in close focus — matches a takeover shape in the playbook. 5.6.0 is held in
+              <strong>one ACID transaction</strong>: hold, trust state, distro advisory, audit row.
+              All four writes or none.
+            </p>
+            <p>
+              The decision comes from the years, not from this event's diff — a 90-day slice of this
+              attack is three innocuous commits. And this is a <strong>ground-truth replay of a real
+              incident, not a benchmark</strong>: accuracy is measured separately, on held-out arcs the
+              playbook never saw. <a href="#ledger">See the honest ledger.</a>
+            </p>
+            <p class="hold-meta">reproduce: <a href="#run"><code>npm run replay</code></a> &rarr; then <code>npm run explain -- --hold &lt;uuid&gt;</code></p>
+          </div>
+        </div></li>
+
+        <li class="coda reveal"><div class="tl-ev">
+          <div class="when">2024-03-29</div><div class="dot" aria-hidden="true"><i></i></div>
+          <div class="tl-body">
+            <div class="tl-top"><span class="chip slate">Andres Freund &middot; unrelated engineer</span><span class="kind">disclosure</span></div>
+            <p>
+              34 days and a second poisoned release later — while the accounts that built the mechanism
+              lobbied distributions to ship it — a PostgreSQL developer chases <strong>~500&nbsp;ms of
+              unexplained sshd latency</strong> and finds the backdoor. CVE-2024-3094, CVSS 10.0.
+              <strong>A performance anomaly found it. No review did.</strong>
+            </p>
+            <p class="src"><a href="https://www.openwall.com/lists/oss-security/2024/03/29/4" target="_blank" rel="noopener noreferrer">source: oss-security disclosure</a></p>
+          </div>
+        </div></li>
+      </ol>
+
+      <p class="tl-foot">&asymp; marks dates public sources give only to within a window — flagged <code>approximate: true</code> in the data. Event text is faithful paraphrase or direct quotation of public material, per the provenance note in <code>data/xz-timeline.json</code>.</p>
+      <p class="tl-foot">Seven of the 25 events are not drawn above: four routine contribution beats, and three post-ship rows — the 5.6.1 rebuild of the backdoor and the push to get distributions shipping it — folded into the final row.</p>
+    </div>
+  </section>
+
+  <!-- ============ MEMORY ============ -->
+  <section id="memory" aria-labelledby="memory-h">
+    <div class="wrap">
+      <p class="sec-eyebrow">02 &middot; Agentic memory design</p>
+      <h2 id="memory-h">What a review cannot see, memory can</h2>
+      <p class="sec-intro">
+        The memory layer is the product. Events are ingested into CockroachDB, and the behavioural arc
+        is rebuilt by reading that history <em>back out of the cluster</em>, bounded to what was
+        knowable at the assessment timestamp. The database is the memory, not a log of it.
+      </p>
+
+      <blockquote class="pull">
+        <span class="q" aria-hidden="true">&ldquo;</span>The decision is not made on the incoming event. It is
+        made on what the incoming event means given everything already in the
+        database.<span class="q" aria-hidden="true">&rdquo;</span>
+      </blockquote>
+
+      <div class="duo">
+        <div class="panel reveal">
+          <span class="sub">Per-commit view</span>
+          <h3>What one code review sees</h3>
+          <div class="review-sim" role="img" aria-label="A simulated review of the payload commit: message 'Tests: Add a few test files', two binary .xz fixture files, verdict looks good">
+            <div class="rrow"><span class="cm">commit</span> &ldquo;Tests: Add a few test files.&rdquo;</div>
+            <div class="rrow">+ tests/files/bad-3-corrupt_lzma2.xz <span class="cm">(binary)</span></div>
+            <div class="rrow">+ tests/files/good-large_compressed.lzma <span class="cm">(binary)</span></div>
+            <div class="rrow"><span class="ok">&#10003; looks good</span> <span class="cm">— fixtures, conventionally unread</span></div>
+          </div>
+          <p class="cap">
+            The payload commit, as its reviewer met it. And the loader stage never entered git at all —
+            it existed only in the release tarball. For this attack the per-event view is not merely
+            thin; it is structurally blind.
+          </p>
+        </div>
+
+        <div class="panel reveal">
+          <span class="sub">Cross-year arc view</span>
+          <h3>What 28 months of memory sees</h3>
+          <ul>
+            <li><strong>An unusually fast rise:</strong> no account history at all &rarr; write access in roughly 13 months.</li>
+            <li><strong>Concentration on build machinery</strong> — release tooling, CI, fuzzer config — rather than library code.</li>
+            <li><strong>Pressure accounts with zero code</strong> that vanished the moment the handover completed.</li>
+            <li><strong>A maintainer reviewing his own release artifacts:</strong> the review gate quietly became one person.</li>
+          </ul>
+          <p class="cap">
+            None of these is a hand-written rule. They are what the arc looks like once years of events are
+            rolled into one summary (Bedrock Claude), embedded (Bedrock Titan), and searched against known
+            takeover shapes in CockroachDB.
+          </p>
+        </div>
+      </div>
+
+      <div class="gate">
+        <h3>The gate is two-sided — so it does not cry wolf</h3>
+        <p class="sec-intro">
+          A bare &ldquo;similarity to a known takeover &ge; X&rdquo; rule flags any contributor who is new
+          and prolific — which describes most good first-time maintainers. Sleeper holds only when the arc
+          is <strong>close to a takeover shape</strong> <em>and</em> <strong>meaningfully closer to it than to
+          the nearest ordinary-contributor shape</strong>. Several benign arcs in the playbook are written to
+          resemble takeovers on the surface — fast rise, handover, brand-new account — so the second test has
+          teeth.
+        </p>
+        <div class="bars" role="img" aria-label="Distance comparison for the xz arc: the nearest takeover shape is close, the nearest benign shape is farther away, so both hold conditions are met">
+          <div class="bar-row">
+            <span class="lbl">nearest takeover shape</span>
+            <div class="bar-track"><div class="bar-fill take"></div></div>
+          </div>
+          <div class="bar-row">
+            <span class="lbl">nearest benign shape</span>
+            <div class="bar-track"><div class="bar-fill ben"></div></div>
+          </div>
+          <div class="bar-row"><span class="lbl" aria-hidden="true"></span><span class="bar-note">&larr; shorter bar = closer in cosine distance (illustrative geometry, not measured values)</span></div>
+        </div>
+        <span class="verdict">close to takeover AND separated from benign &rarr; HOLD</span>
+        <p class="sec-intro gate-foot">
+          Structural signals — tenure, escalation speed, build-system concentration, no-code pressure
+          accounts — are computed from memory and <strong>cited in the hold rationale, but they do not
+          vote.</strong> Mixing a hand-tuned rule engine into the decision would quietly turn the benchmark
+          into a measurement of the rules rather than of the memory.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ ARCHITECTURE ============ -->
+  <section id="architecture" aria-labelledby="arch-h">
+    <div class="wrap">
+      <p class="sec-eyebrow">03 &middot; Architecture</p>
+      <h2 id="arch-h">One event arrives. Years answer.</h2>
+      <p class="sec-intro">
+        The production shape: one webhook-shaped event lands, is embedded and written, then assessed
+        against everything already in memory. The demo drives the same loop over the xz corpus.
+      </p>
+
+      <ol class="flow" aria-label="Pipeline overview">
+        <li><span class="node"><b>Webhook-shaped event</b>replayed xz timeline</span></li>
+        <li><span class="node"><b>Agent loop</b>Lambda handler / local server</span></li>
+        <li><span class="node"><b>AWS Bedrock</b>Titan embeds &middot; Claude rolls the arc</span></li>
+        <li><span class="node"><b>CockroachDB</b>events &middot; actor_arcs &middot; playbook — 3 vector indexes</span></li>
+        <li><span class="node"><b>Two-sided gate</b>takeover-close AND benign-far</span></li>
+        <li><span class="node"><b>One ACID transaction</b>hold + trust + advisory + audit</span></li>
+        <li><span class="node"><b>Audit surface</b><code>npm run explain</code> &middot; MCP client</span></li>
+      </ol>
+
+      <div class="stage reveal">
+        <div>
+          <span class="num">STAGE 01</span>
+          <h3>Ingest and embed every signal</h3>
+          <p>
+            Every commit, email, maintainer change and release is embedded through
+            <strong>Bedrock Titan Text Embeddings V2</strong> (1024 dimensions, matching
+            <code>VECTOR(1024)</code>) and written to <code>events</code>. The vector index is declared
+            inline in <code>CREATE TABLE</code> on purpose: backfilling one onto a non-empty table blocks
+            writes, so the index exists before the first row lands. Webhook delivery is at-least-once, so
+            every event carries a deterministic <code>event_key</code> under a <code>UNIQUE</code> index —
+            a redelivery can never double-weight a signal inside the very memory the decision is derived
+            from.
+          </p>
+        </div>
+        <div class="codebox">
+          <div class="cb-head"><span>sql/schema.sql — abridged</span></div>
+          <pre><code><span class="kw">CREATE TABLE</span> events (
+  package_id  <span class="kw">STRING</span> <span class="kw">NOT NULL</span>,
+  actor_id    <span class="kw">STRING</span> <span class="kw">NOT NULL</span>,
+  kind        <span class="kw">STRING</span> <span class="kw">NOT NULL</span>,  <span class="cm">-- commit | email | …</span>
+  content     <span class="kw">STRING</span> <span class="kw">NOT NULL</span>,
+  occurred_at <span class="kw">TIMESTAMPTZ</span> <span class="kw">NOT NULL</span>,
+  source_url  <span class="kw">STRING</span>,             <span class="cm">-- public citation</span>
+  event_key   <span class="kw">STRING</span> <span class="kw">NOT NULL</span>,  <span class="cm">-- webhook dedup</span>
+  embedding   <span class="kw">VECTOR</span>(1024) <span class="kw">NOT NULL</span>,
+  <span class="hl">VECTOR INDEX</span> events_pkg_embedding_idx
+    (package_id, embedding vector_cosine_ops),
+  <span class="kw">UNIQUE INDEX</span> events_event_key_idx (event_key)
+);</code></pre>
+        </div>
+      </div>
+
+      <div class="stage reveal">
+        <div>
+          <span class="num">STAGE 02</span>
+          <h3>Roll the arc — from the database, not the feed</h3>
+          <p>
+            At a release event the actor's history is read <strong>back out of CockroachDB</strong> — never
+            out of the seed file — filtered to what was knowable at the assessment timestamp, so a replay
+            cannot leak hindsight into a past decision. <strong>Bedrock Claude</strong> (Converse) rolls it
+            into a 90-day behavioural arc summary, embedded and stored in <code>actor_arcs</code> under the
+            same prefix-scoped index shape.
+          </p>
+        </div>
+        <div class="codebox">
+          <div class="cb-head"><span>sql/schema.sql — abridged</span></div>
+          <pre><code><span class="kw">CREATE TABLE</span> actor_arcs (
+  package_id  <span class="kw">STRING</span> <span class="kw">NOT NULL</span>,
+  actor_id    <span class="kw">STRING</span> <span class="kw">NOT NULL</span>,
+  window_start <span class="kw">TIMESTAMPTZ</span> <span class="kw">NOT NULL</span>,
+  window_end   <span class="kw">TIMESTAMPTZ</span> <span class="kw">NOT NULL</span>,
+  arc_summary  <span class="kw">STRING</span> <span class="kw">NOT NULL</span>,  <span class="cm">-- Claude rollup</span>
+  embedding    <span class="kw">VECTOR</span>(1024) <span class="kw">NOT NULL</span>,
+  <span class="hl">VECTOR INDEX</span> actor_arcs_pkg_embedding_idx
+    (package_id, embedding vector_cosine_ops)
+);</code></pre>
+        </div>
+      </div>
+
+      <div class="stage reveal">
+        <div>
+          <span class="num">STAGE 03</span>
+          <h3>Prefix-scoped retrieval — proven, not claimed</h3>
+          <p>
+            The ANN search over this package's own memory is pre-filtered by the leading vector-index
+            column, so it is bounded to one package instead of scanning globally. The replay runs
+            <code>EXPLAIN</code> on the live query and prints the plan; the <strong>prefix spans</strong> line
+            is the proof, and the integration suite asserts it — on the deciding query as well as the one
+            shown on camera.
+          </p>
+        </div>
+        <div class="codebox">
+          <div class="cb-head"><span>the scoped query + its plan</span></div>
+          <pre><code><span class="kw">WHERE</span> package_id = $1
+<span class="kw">ORDER BY</span> embedding &lt;=&gt; $2
+<span class="kw">LIMIT</span> k
+
+<span class="cm">-- the EXPLAIN line the integration suite asserts on:</span>
+<span class="hl">prefix spans: [/'xz-utils' - /'xz-utils']</span></code></pre>
+        </div>
+      </div>
+
+      <div class="stage reveal">
+        <div>
+          <span class="num">STAGE 04</span>
+          <h3>Match against the playbook — held-out excluded</h3>
+          <p>
+            A second ANN query compares the arc against <code>takeover_playbook</code>, deliberately
+            <strong>unscoped by package</strong> — a takeover shape learned anywhere must be matchable
+            from anywhere. Its index prefix is <code>(held_out, embedding_model)</code> instead: rows
+            marked <code>held_out</code> exist only for evaluation, and the prefix keeps them out
+            <strong>inside the index descent</strong>. A post-filter would let them consume top-k slots
+            first and silently collapse the decision margin. The playbook itself contains
+            <strong>no xz-derived arc</strong>: matching xz against a corpus containing xz would prove
+            nothing.
+          </p>
+        </div>
+        <div class="codebox">
+          <div class="cb-head"><span>sql/schema.sql — abridged</span></div>
+          <pre><code><span class="kw">CREATE TABLE</span> takeover_playbook (
+  label       <span class="kw">STRING</span> <span class="kw">NOT NULL</span>,  <span class="cm">-- 'takeover' | 'benign'</span>
+  source      <span class="kw">STRING</span> <span class="kw">NOT NULL</span>,  <span class="cm">-- real-xz | synthetic</span>
+  held_out    <span class="kw">BOOL</span> <span class="kw">NOT NULL</span>
+                <span class="kw">DEFAULT</span> <span class="kw">false</span>,      <span class="cm">-- true = eval only</span>
+  arc_summary <span class="kw">STRING</span> <span class="kw">NOT NULL</span>,
+  embedding   <span class="kw">VECTOR</span>(1024) <span class="kw">NOT NULL</span>,
+  embedding_model <span class="kw">STRING</span> <span class="kw">NOT NULL</span>,
+  <span class="cm">-- no package_id prefix; held-out rows are</span>
+  <span class="cm">-- dropped during the index descent:</span>
+  <span class="hl">VECTOR INDEX</span> takeover_playbook_embedding_idx
+    (held_out, embedding_model, embedding vector_cosine_ops)
+);</code></pre>
+        </div>
+      </div>
+
+      <div class="stage reveal">
+        <div>
+          <span class="num">STAGE 05</span>
+          <h3>The hold — four writes, one COMMIT</h3>
+          <p>
+            If the two-sided decision trips, <strong>Bedrock Claude</strong> composes the hold rationale and
+            the distro advisory, and the agent commits everything as one transaction. A failure mid-write
+            leaves <strong>no partial state</strong> — no blocked release with an orphaned advisory, no
+            advisory for a hold that rolled back. An integration test kills the transaction mid-write and
+            asserts nothing survives. The retraction path is symmetrical: <code>commitUnhold</code> flips
+            trust state, queues a retraction advisory and appends an audit row in one transaction, and
+            never deletes the hold it is retracting.
+          </p>
+        </div>
+        <div class="codebox">
+          <div class="cb-head"><span>the shape of the hold commit</span></div>
+          <pre><code><span class="kw">BEGIN</span>;
+  <span class="kw">INSERT INTO</span> release_hold      <span class="cm">-- rationale + matched arc</span>
+  <span class="kw">UPDATE</span>      trust_state       <span class="cm">-- package -> 'held'</span>
+  <span class="kw">INSERT INTO</span> distro_advisory_outbox
+  <span class="kw">INSERT INTO</span> audit_log
+<span class="hl">COMMIT;  -- all four or none</span></code></pre>
+        </div>
+      </div>
+
+      <div class="stage reveal">
+        <div>
+          <span class="num">STAGE 06</span>
+          <h3>&ldquo;Explain your hold&rdquo;</h3>
+          <p>
+            Every hold carries the matched arc, the similarity, the threshold in force, the
+            <code>EXPLAIN</code> verdict and the structural evidence — in <strong>queryable rows, not
+            logs</strong>. A downstream distro packager audits it in one statement. The reader resolves at
+            runtime: with <code>COCKROACH_MCP_API_KEY</code> set the reads go through the Managed MCP
+            Server, otherwise over the pg pool — and every run prints which path it took, verbatim,
+            before any output. That MCP path has <strong>not yet been run against the live server</strong>
+            (<a href="#stack">status below</a>).
+          </p>
+        </div>
+        <div class="codebox">
+          <div class="cb-head"><span>terminal</span><button class="copy" type="button" aria-label="Copy the audit commands" data-copy="npm run explain
+npm run explain -- --hold <uuid>">copy</button></div>
+          <pre><code><span class="pr">$</span> npm run explain                  <span class="cm"># plan + nearest events</span>
+<span class="pr">$</span> npm run explain -- --hold &lt;uuid&gt; <span class="cm"># one hold, full trail</span>
+
+<span class="cm">-- every run names its path on the first line:</span>
+<span class="hl">AUDIT PATH: direct SQL over the pg pool — NOT the Managed MCP Server</span></code></pre>
+        </div>
+      </div>
+
+      <div class="acid reveal">
+        <p><strong>Why this is CockroachDB and not a vector database bolted onto a relational one:</strong></p>
+        <p>
+          the vector search that produces the decision and the state change that acts on it are the
+          <strong>same system</strong>, so a hold cannot half-land. There is no window where a release is
+          blocked with no advisory queued, or an advisory goes out for a hold that rolled back.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ STACK ============ -->
+  <section id="stack" aria-labelledby="stack-h">
+    <div class="wrap">
+      <p class="sec-eyebrow">04 &middot; Required tech, meaningfully integrated</p>
+      <h2 id="stack-h">CockroachDB &times; AWS</h2>
+      <p class="sec-intro">
+        Every status below is exact: where something has not yet run against live infrastructure, it says so.
+      </p>
+      <div class="stack-grid">
+        <div class="stack-card reveal">
+          <span class="sub">Persistent memory layer</span>
+          <h3>CockroachDB</h3>
+          <dl>
+            <dt>Distributed Vector Indexing <span class="status live">in the code &amp; tests</span></dt>
+            <dd>
+              Three inline <code>VECTOR INDEX</code> declarations in <code>sql/schema.sql</code>.
+              <code>events</code> and <code>actor_arcs</code> are indexed on
+              <code>(package_id, embedding vector_cosine_ops)</code>, so ANN search is prefix-scoped to one
+              package's own history. <code>takeover_playbook</code> carries no package prefix on purpose —
+              its prefix columns are <code>held_out</code> and <code>embedding_model</code>, which drop
+              evaluation-only arcs during the index descent. Retrieval orders by <code>&lt;=&gt;</code>
+              cosine distance, and <code>EXPLAIN</code> on the live queries proves the
+              <code>prefix spans</code> pre-filter — asserted in the integration suite.
+            </dd>
+            <dt>ccloud CLI <span class="status live">scripted</span></dt>
+            <dd>
+              <code>scripts/provision.sh</code> (<code>npm run provision</code>) creates the Basic cluster
+              and two service identities with different privilege scopes: <code>ingest_svc</code> gets
+              <code>INSERT, SELECT</code> on <code>events</code> and nothing else, <code>gate_svc</code>
+              reads everything and writes only the tables a hold touches. Both have <code>admin</code>
+              revoked, and neither can delete. Executable <code>GRANT</code>s, not a README claim.
+            </dd>
+            <dt>Managed MCP Server <span class="status pending">client built, not yet verified live</span></dt>
+            <dd>
+              A unit-tested client in <code>src/mcp.ts</code> drives four MCP read tools —
+              <code>select_query</code>, <code>explain_query</code>, <code>get_table_schema</code>,
+              <code>show_statement</code> — putting an explicit <code>LIMIT</code> on every SELECT, because
+              the server silently caps an unlimited one at 25 rows and a truncated evidence trail must not
+              pass as complete. It has <strong>not yet been run against the live Managed MCP Server</strong>
+              (<code>npm run mcp:audit</code> is the entry point); today the same reads take the direct-SQL
+              fallback, which every run prints.
+            </dd>
+          </dl>
+        </div>
+        <div class="stack-card reveal">
+          <span class="sub">Inference + compute</span>
+          <h3>AWS</h3>
+          <dl>
+            <dt>Bedrock — Titan Text Embeddings V2 <span class="status live">in the code &amp; tests</span></dt>
+            <dd>
+              <code>InvokeModel</code> embeds every event on write and every arc summary before retrieval —
+              1024 dimensions, matching <code>VECTOR(1024)</code> in the schema.
+            </dd>
+            <dt>Bedrock — Claude <span class="status live">in the code &amp; tests</span></dt>
+            <dd>
+              <code>Converse</code> rolls a multi-year event history into one behavioural arc summary, then
+              composes the hold rationale and the distro advisory that go into the transaction.
+            </dd>
+            <dt>Lambda <span class="status pending">written &amp; typechecked, not yet deployed</span></dt>
+            <dd>
+              <code>src/handler.ts</code> exports the loop as <code>ingestHandler</code> — one webhook event
+              in, assessed against everything already in memory — plus <code>replayHandler</code>. The
+              connection pool is closed per invocation, because a socket held across an execution-context
+              freeze comes back dead.
+            </dd>
+          </dl>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ RUN ============ -->
+  <section id="run" aria-labelledby="run-h">
+    <div class="wrap">
+      <p class="sec-eyebrow">05 &middot; Reproduce it</p>
+      <h2 id="run-h">Run it locally</h2>
+      <p class="sec-intro">
+        Prerequisites: Node.js &ge; 22 &middot; a CockroachDB cluster with vector indexing (Cloud Basic, or
+        a local v25.2+ node) &middot; an AWS account with Bedrock access for Titan Text Embeddings V2 and a
+        Claude model. Full methodology lives in <code>DEMO.md</code> in the repo.
+      </p>
+
+      <h3>1 &middot; Provision the cluster <span class="mono-tag">— CockroachDB ccloud CLI</span></h3>
+      <div class="codebox">
+        <div class="cb-head"><span>terminal</span><button class="copy" type="button" aria-label="Copy the cluster provisioning commands" data-copy="ccloud auth login
+ccloud cluster create basic sleeper-cluster --cloud GCP --spend-limit 0
+ccloud cluster user create sleeper-cluster ingest_svc
+ccloud cluster user create sleeper-cluster gate_svc
+ccloud cluster sql --connection-url sleeper-cluster">copy</button></div>
+        <pre><code><span class="pr">$</span> ccloud auth login
+<span class="pr">$</span> ccloud cluster create basic sleeper-cluster --cloud GCP --spend-limit 0
+<span class="pr">$</span> ccloud cluster user create sleeper-cluster ingest_svc   <span class="cm"># write path</span>
+<span class="pr">$</span> ccloud cluster user create sleeper-cluster gate_svc     <span class="cm"># decision path</span>
+<span class="pr">$</span> ccloud cluster sql --connection-url sleeper-cluster     <span class="cm"># -&gt; DATABASE_URL</span></code></pre>
+      </div>
+
+      <h3>2 &middot; Load, calibrate, replay <span class="mono-tag">— live Bedrock inference</span></h3>
+      <div class="codebox">
+        <div class="cb-head"><span>terminal</span><button class="copy" type="button" aria-label="Copy the load, calibrate and replay commands" data-copy="npm install
+cp .env.example .env
+npm run schema
+npm run seed
+npm run calibrate
+npm start">copy</button></div>
+        <pre><code><span class="pr">$</span> npm install
+<span class="pr">$</span> cp .env.example .env   <span class="cm"># DATABASE_URL + Bedrock model ids</span>
+<span class="pr">$</span> npm run schema         <span class="cm"># tables + the three vector indexes</span>
+<span class="pr">$</span> npm run seed           <span class="cm"># playbook and held-out arc corpora</span>
+<span class="pr">$</span> npm run calibrate      <span class="cm"># fits thresholds on the playbook split ONLY</span>
+<span class="pr">$</span> npm start              <span class="cm"># http://localhost:3000 -&gt; "Replay the xz timeline"</span></code></pre>
+      </div>
+      <p class="run-note">
+        Terminal equivalents: <code>npm run replay</code>, then <code>npm run explain -- --hold &lt;uuid&gt;</code>.
+        <code>npm run calibrate</code> writes <code>data/thresholds.json</code>, which is deliberately not
+        committed — a thresholds file fitted against a different embedding model would silently move the gate.
+      </p>
+
+      <h3>3 &middot; No AWS account? <span class="mono-tag">— offline wiring check</span></h3>
+      <div class="codebox">
+        <div class="cb-head"><span>terminal</span><button class="copy" type="button" aria-label="Copy the offline local-cluster commands" data-copy="cockroach start-single-node --insecure --listen-addr=localhost:26257 --store=/tmp/sleeper-crdb
+cockroach sql --insecure -e 'CREATE DATABASE sleeper'
+export DATABASE_URL='postgresql://root@localhost:26257/sleeper?sslmode=disable'
+export SLEEPER_OFFLINE=1
+npm run schema && npm run seed && npm run calibrate && npm run replay">copy</button></div>
+        <pre><code><span class="pr">$</span> cockroach start-single-node --insecure --listen-addr=localhost:26257 --store=/tmp/sleeper-crdb
+<span class="pr">$</span> cockroach sql --insecure -e 'CREATE DATABASE sleeper'
+<span class="pr">$</span> export DATABASE_URL='postgresql://root@localhost:26257/sleeper?sslmode=disable'
+<span class="pr">$</span> export SLEEPER_OFFLINE=1
+<span class="pr">$</span> npm run schema &amp;&amp; npm run seed &amp;&amp; npm run calibrate &amp;&amp; npm run replay</code></pre>
+      </div>
+      <p class="run-note">
+        <strong>Offline mode detects nothing.</strong> It swaps Bedrock for a deterministic hashed
+        stand-in, which carries no notion of what a takeover means, so the replay ends with the gate open.
+        It proves the schema, the SQL, the vector-index behaviour and the transaction semantics — nothing
+        more. Every entry point prints which inference path it is on, and <code>npm run bench</code>
+        refuses to run in this mode at all.
+      </p>
+
+      <h3>4 &middot; Tests <span class="mono-tag">— 207 in the suite</span></h3>
+      <div class="codebox">
+        <div class="cb-head"><span>terminal</span><button class="copy" type="button" aria-label="Copy the test commands" data-copy="npm test">copy</button></div>
+        <pre><code><span class="pr">$</span> npm test   <span class="cm"># cluster-dependent tests skip without DATABASE_URL</span>
+<span class="pr">$</span> DATABASE_URL='postgresql://root@localhost:26257/sleeper?sslmode=disable' npm test
+
+<span class="cm"># with no DATABASE_URL and no credentials:</span>
+<span class="hl">Tests  168 passed | 39 skipped (207)</span></code></pre>
+      </div>
+      <p class="run-note">
+        <strong>207 tests.</strong> On a bare clone with no credentials, <strong>168 pass</strong> and
+        <strong>39 skip</strong> pending a live cluster — the 39 assert the <code>prefix spans</code> plan
+        line, held-out exclusion, the all-or-nothing hold and unhold transactions, and point-in-time
+        correctness (a decision can never see an event from after its own assessment timestamp). They
+        namespace every row to a per-run package id, so they are safe to point at the demo cluster. Those
+        counts are the literal output of <code>npx vitest run</code> on this commit — re-run it rather
+        than trusting the number.
+      </p>
+    </div>
+  </section>
+
+  <!-- ============ LEDGER ============ -->
+  <section id="ledger" aria-labelledby="ledger-h">
+    <div class="wrap">
+      <p class="sec-eyebrow">06 &middot; Calibrated honesty</p>
+      <h2 id="ledger-h">The honest ledger</h2>
+      <p class="sec-intro">
+        What is demonstrated, what is measured, what is pending, what was cut — kept apart, because
+        blurring them is how a single anecdote masquerades as a detection rate.
+      </p>
+      <div class="ledger-grid">
+        <div class="ledger-card reveal">
+          <h3>Why no number appears on this page</h3>
+          <ul>
+            <li><strong>The benchmark has not been run, so this page cites no accuracy or latency figure.</strong> The <code>BENCH</code> block in <code>DEMO.md</code> is still empty; the measured table lands there when it runs against a live cluster.</li>
+            <li><code>npm run bench</code> measures recall@k, hold recall, false-positive rate, precision and p50/p95 decision latency — <strong>only on held-out arcs</strong> the agent can never retrieve, against a lexical baseline, with the xz timeline excluded from every figure.</li>
+            <li>The xz replay is <strong>ground truth on a real incident</strong>: evidence the mechanic recognises the actual takeover. It is not a measurement and it feeds no metric.</li>
+            <li>Thresholds are fitted by leave-one-out on the playbook split only, never on the evaluation set, and the fitted file is gitignored.</li>
+          </ul>
+        </div>
+        <div class="ledger-card reveal">
+          <h3>True today</h3>
+          <ul>
+            <li><strong>207 tests</strong> — 168 pass on a bare clone, 39 skip until a live cluster is reachable.</li>
+            <li>The hold is <strong>all-or-nothing under an explicit rollback test</strong>, and history reads are bounded by the assessment timestamp.</li>
+            <li>A hold has <strong>a recorded way out</strong>: <code>commitUnhold</code> flips trust state, queues a retraction advisory and appends an audit row in one transaction, and the hold row itself is append-only.</li>
+            <li>Two service identities with distinct privilege scopes (<code>ingest_svc</code> / <code>gate_svc</code>), provisioned by script.</li>
+            <li>Managed MCP Server client: <strong>written and unit-tested, not yet run against the live server.</strong></li>
+            <li>Lambda handlers: <strong>written and typechecked, not yet deployed.</strong> Nothing here is running in production.</li>
+            <li>A decision with no benign neighbour to contrast against <strong>refuses to hold</strong> rather than passing on a similarity score alone.</li>
+          </ul>
+        </div>
+        <div class="ledger-card reveal">
+          <h3>Cut on purpose</h3>
+          <ul>
+            <li>One package, one flow, done deeply. <strong>No multi-package dashboard, no user accounts, no orchestration layer, no multi-region, no second demo scenario.</strong></li>
+            <li>S3-backed tarball diffing — the build-vs-source tell — is described in the architecture and not wired in this build.</li>
+            <li>Offline mode is a wiring check, never presented as detection.</li>
+            <li>No users, no deployment, no uptime claim, and no adoption number. There is nothing to be honest about there yet.</li>
+            <li>Nothing on this page claims a capability the code does not have; where something is pending, it says so.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="judge reveal">
+        <h3>Where each judging criterion lives on this page</h3>
+        <div class="judge-scroll">
+        <table>
+          <thead><tr><th scope="col">Criterion (5 &times; 20%)</th><th scope="col">The evidence</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>Agentic Memory Design <span class="tiebreak">tie-break</span></td>
+              <td>Memory is the decision: prefix-scoped vector retrieval over years of accumulated events; a 90-day slice of this attack is three innocuous commits. <a href="#memory">&sect; What memory sees</a></td>
+            </tr>
+            <tr>
+              <td>Technical Implementation</td>
+              <td>Three inline vector indexes, <code>&lt;=&gt;</code> retrieval with an <code>EXPLAIN</code>-asserted <code>prefix spans</code> pre-filter, one ACID hold transaction, 207 tests. <a href="#architecture">&sect; Architecture</a></td>
+            </tr>
+            <tr>
+              <td>Real-World Impact</td>
+              <td>The exact pattern of CVE-2024-3094, replayed from the cited public record; an audit trail a distro packager queries in one statement. <a href="#timeline">&sect; The arc</a></td>
+            </tr>
+            <tr>
+              <td>Production Readiness</td>
+              <td>Two privilege-scoped service identities, rollback-tested holds and unholds, point-in-time reads, gitignored thresholds — and an explicit ledger of what is not done. <a href="#ledger">&sect; This section</a></td>
+            </tr>
+            <tr>
+              <td>Creativity &amp; Originality</td>
+              <td>A release gate that argues from years rather than diffs, with a two-sided gate so patient memory does not become a wolf-crier. <a href="#memory">&sect; The two-sided gate</a></td>
+            </tr>
+          </tbody>
+        </table>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <div class="cols">
+      <div>
+        <h2>Provenance</h2>
+        <p>
+          The timeline on this page is reconstructed from the public record of CVE-2024-3094 and ships as
+          <code>data/xz-timeline.json</code>, with a <code>source_url</code> on all 25 events and
+          approximate dates flagged. Event text is faithful paraphrase or direct quotation of public
+          material, not invented content.
+        </p>
+        <p>
+          Repository files referenced here: <code>README.md</code>, <code>DEMO.md</code>,
+          <code>sql/schema.sql</code>, <code>src/handler.ts</code>, <code>src/memory.ts</code>,
+          <code>src/mcp.ts</code>, <code>scripts/provision.sh</code>, <code>data/xz-timeline.json</code>.
+        </p>
+      </div>
+      <div>
+        <h2>Primary sources</h2>
+        <ul>
+          <li><a href="https://www.openwall.com/lists/oss-security/2024/03/29/4" target="_blank" rel="noopener noreferrer">Andres Freund's oss-security disclosure</a></li>
+          <li><a href="https://www.mail-archive.com/xz-devel@tukaani.org/" target="_blank" rel="noopener noreferrer">xz-devel mailing-list archive</a></li>
+          <li><a href="https://github.com/tukaani-project/xz" target="_blank" rel="noopener noreferrer">tukaani-project/xz git history</a></li>
+          <li><a href="https://research.swtch.com/xz-timeline" target="_blank" rel="noopener noreferrer">research.swtch.com — xz timeline</a></li>
+          <li><a href="https://boehs.org/node/everything-i-know-about-the-xz-backdoor" target="_blank" rel="noopener noreferrer">boehs.org — everything about the xz backdoor</a></li>
+          <li><a href="https://nvd.nist.gov/vuln/detail/CVE-2024-3094" target="_blank" rel="noopener noreferrer">NVD — CVE-2024-3094</a></li>
+        </ul>
+      </div>
+    </div>
+    <p class="fin">Sleeper &middot; built for the CockroachDB &times; AWS Agentic Memory Hackathon &middot; MIT License &middot; the release gate that remembers.</p>
+  </div>
+</footer>
+
+<script>
+(function () {
+  document.documentElement.classList.add("js");
+
+  // copy buttons
+  document.querySelectorAll(".copy").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var text = btn.getAttribute("data-copy");
+      function done(ok) {
+        var prev = btn.textContent;
+        btn.textContent = ok ? "copied" : "select + copy";
+        setTimeout(function () { btn.textContent = prev; }, 1600);
+      }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () { done(true); }, function () { done(false); });
+      } else { done(false); }
+    });
+  });
+
+  // scroll reveal — skipped for reduced motion; content visible without JS by default
+  var reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var items = document.querySelectorAll(".reveal");
+  if (!reduced && "IntersectionObserver" in window) {
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); }
+      });
+    }, { rootMargin: "0px 0px -8% 0px", threshold: 0.05 });
+    items.forEach(function (el) { io.observe(el); });
+  } else {
+    items.forEach(function (el) { el.classList.add("in"); });
+  }
+})();
+</script>
+</body>
+</html>
