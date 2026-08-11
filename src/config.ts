@@ -72,7 +72,35 @@ export const config = {
   packageId: process.env.PACKAGE_ID ?? 'xz-utils',
   /** Rolling behavioural window, in days, that an actor arc summarises. */
   arcWindowDays: Number(process.env.ARC_WINDOW_DAYS ?? 90),
-  /** The account whose arc the xz replay assesses at the 5.6.0 release. */
+  /**
+   * OPTIONAL pin, and that is now all it is.
+   *
+   * This used to be the answer key. The agent assessed exactly the account named here, which meant
+   * it could only ever catch an attacker somebody had already pointed at — precisely the position
+   * the world was in for the 2.5 years the real xz attack ran. `assess()` now enumerates the
+   * actors out of the package's own memory and ranks them itself (see `rankCandidates` in
+   * src/agent.ts); this is read only as an override, for pinning a recorded demo to one account so
+   * two runs produce the same frames.
+   *
+   * Null when SUSPECT_ACTOR is unset, which is the normal path and the one the tests exercise.
+   */
+  suspectActorOverride: process.env.SUSPECT_ACTOR ?? null,
+
+  /**
+   * How many ranked candidates get an arc built per release. Cost knob: each one is a Converse
+   * call plus an embed call. See MAX_CANDIDATES in src/agent.ts.
+   */
+  maxCandidates: Number(process.env.SUSPECT_CANDIDATES ?? 3),
+
+  /**
+   * Fallback actor for the READ-ONLY inspection surfaces (`npm run explain`, GET /api/explain)
+   * when nothing else has named one — they need some actor id to load a stored arc for, and on a
+   * fresh clone the xz protagonist is the arc worth showing.
+   *
+   * It decides nothing. The server prefers the actor the last replay actually chose, and the
+   * decision path reads `suspectActorOverride`, never this. It keeps the name `suspectActor` only
+   * because scripts/explain.ts still reads it; when that script learns `--actor`, this goes away.
+   */
   suspectActor: process.env.SUSPECT_ACTOR ?? 'jia-tan',
   /** Demo server port. */
   port: Number(process.env.PORT ?? 3000),

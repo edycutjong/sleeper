@@ -1,12 +1,18 @@
 /**
  * The agent loop.
  *
- * ingest event -> embed -> roll up the actor arc -> prefix-scoped retrieval over this package's
- * own memory -> unscoped retrieval against the takeover playbook -> threshold decision -> if it
- * trips, one atomic HOLD transaction.
+ * ingest event -> embed -> enumerate candidate actors out of memory -> roll up each candidate's
+ * arc -> prefix-scoped retrieval over this package's own memory -> unscoped retrieval against the
+ * takeover playbook -> threshold decision -> if it trips, one atomic HOLD transaction.
  *
  * Every step is emitted so the same function drives the terminal replay, the HTTP demo and the
  * Lambda handler. There is exactly one implementation of the decision path in this repo.
+ *
+ * The candidate step exists because the honest criticism of the first version of this file was
+ * that it assessed exactly one account — the one named in config — so it could only ever catch an
+ * attacker somebody had already pointed at, which is precisely the state the world was in for the
+ * 2.5 years the real xz attack ran. Nobody names the suspect now: the actors come out of the
+ * package's own memory and are ranked by structural signals the memory layer already computes.
  */
 import { converse, embed } from './embeddings.js'
 import {
@@ -32,6 +38,16 @@ import { createLogger, type Logger } from './log.js'
 export type TimelineEvent = IngestInput & { approximate?: boolean }
 
 export type Step =
+  | {
+      type: 'candidates'
+      /** Every actor with events in this package's memory at the moment of assessment. */
+      considered: number
+      ranked: Candidate[]
+      /** The subset that actually gets an arc built and assessed, in assessment order. */
+      assessed: string[]
+      /** Plain-English account of how that subset was chosen — printed by the replay. */
+      reason: string
+    }
   | {
       type: 'event'
       index: number
@@ -69,7 +85,18 @@ export type Step =
 
 export type ReplayOptions = {
   packageId: string
-  suspectActor: string
+  /**
+   * OPTIONAL pin. Null/absent — the normal case — means the agent enumerates and ranks candidates
+   * out of the package's own memory. Set it only to force a deterministic recording, or when the
+   * caller genuinely knows which account produced the event (the webhook path does: see
+   * `ingestHandler`).
+   */
+  suspectActor?: string | null
+  /**
+   * How many candidates get an arc built for them. Each one costs a Converse call plus an embed
+   * call, so this is the cost knob, not a quality knob — see MAX_CANDIDATES.
+   */
+  maxCandidates?: number
   windowDays: number
   thresholds: Thresholds
   events: TimelineEvent[]
@@ -85,6 +112,10 @@ export type ReplayOptions = {
 
 export type ReplaySummary = {
   ingested: number
+  /** The candidate whose decision the summary reports — chosen by the agent, not configured. */
+  assessedActor: string | null
+  /** Every candidate that had an arc built and assessed on the last assessment, in order. */
+  assessedActors: string[]
   holdId: string | null
   heldAt: string | null
   releaseVersion: string | null
@@ -256,6 +287,180 @@ const RATIONALE_SYSTEM =
   'release, and what the maintainer should check to clear or confirm it. Never assert intent or ' +
   'accuse a named person — describe the behavioural pattern and the evidence. Under 180 words.'
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Candidate selection
+//
+// Who gets assessed, and why it is not a config value.
+//
+// Ranking is NOT deciding. The score below orders a list and caps it at N; it never reaches
+// `decide()`, which still sees playbook matches and nothing else. That separation is the project's
+// whole thesis — structural signals are evidence, not votes — and mixing them in here would turn
+// the benchmark into a measurement of these weights rather than of the memory.
+//
+// The terms and their weights were written down BEFORE they were run against the xz corpus, and
+// they are exported so a reader can re-weight them and see whether the ordering survives. It does:
+// see the uniform-weights assertion in tests/agent.test.ts. A ranking fitted until it produces the
+// known answer would be worthless.
+//
+// HONEST LIMIT: this ranks by "who is in a position to poison a release, and whose history is
+// short, escalated and build-shaped enough to be worth a model call". On a package with one
+// maintainer and one attacker that is a two-horse race and the ranking barely works for its
+// living — the xz corpus is exactly that easy. The claim is only that nobody hands the agent the
+// answer, not that the ordering is hard-won.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type CandidateWeights = {
+  /** Can this account ship an artifact at all? A gate on releases cares about nobody else. */
+  canShip: number
+  /** How fast trust escalated after first contact. A takeover is an escalation that happened. */
+  escalation: number
+  /** Concentration on build/CI machinery — the layer that ships and is least reviewed. */
+  buildConcentration: number
+  /** How recently the account arrived. A ten-year contributor is a poor takeover candidate. */
+  newness: number
+  /** Did accounts that only ever argued for a handover precede this account's privilege? */
+  pressure: number
+}
+
+/** Deliberately round. Precise weights would be a claim to a precision this has no data to earn. */
+export const CANDIDATE_WEIGHTS: CandidateWeights = {
+  canShip: 0.3,
+  escalation: 0.25,
+  buildConcentration: 0.2,
+  newness: 0.15,
+  pressure: 0.1,
+}
+
+/** Escalation faster than this reads as instant; slower reads as an ordinary long climb. */
+export const ESCALATION_HORIZON_DAYS = 730
+/** Tenure past this is "part of the furniture" — a decade, roughly xz-utils' own age. */
+export const TENURE_HORIZON_DAYS = 3650
+
+export type Candidate = {
+  actorId: string
+  /** Weighted sum of the terms, 0..1. An ordering key, never a probability of anything. */
+  score: number
+  terms: Record<keyof CandidateWeights, number>
+  signals: ActorSignals
+}
+
+const clamp01 = (n: number): number => Math.min(1, Math.max(0, n))
+
+/**
+ * Ranks every actor the package's memory has seen by how much a behavioural assessment is worth.
+ *
+ * Pure over rows already read out of CockroachDB, so it runs with no cluster and no model — which
+ * is what makes the "does it still pick jia-tan without being told?" test cheap enough to keep in
+ * the unit suite.
+ *
+ * Note what is deliberately NOT here: recency is not a filter. Restricting candidates to accounts
+ * active in the last 90 days would drop a dormant maintainer who reappears to sign one tarball,
+ * which is the same class of shortcut as naming the suspect in config.
+ */
+export function rankCandidates(
+  history: StoredEvent[],
+  asOf: Date,
+  weights: CandidateWeights = CANDIDATE_WEIGHTS,
+): Candidate[] {
+  const seen = history.filter((e) => e.occurredAt <= asOf)
+  const pressure = pressureAccounts(seen, asOf)
+  const pressureIds = new Set(pressure.map((p) => p.actorId))
+  const actorIds = [...new Set(seen.map((e) => e.actorId))]
+  const total = Object.values(weights).reduce((a, b) => a + b, 0) || 1
+
+  return actorIds
+    .map((actorId) => {
+      const signals = actorSignals(seen, actorId, asOf)
+      const escalatedAfter = signals.daysFromFirstActivityToPrivilege
+
+      // When the actor's own first privileged moment happened, so "was it argued for?" can be
+      // asked about a point in time rather than about the package in general.
+      const privilegeAt =
+        signals.firstSeen && escalatedAfter !== null
+          ? new Date(signals.firstSeen.getTime() + escalatedAfter * 86_400_000)
+          : null
+
+      const terms: Record<keyof CandidateWeights, number> = {
+        // Producing releases is the strongest form of it; commit access is most of the way there.
+        canShip: signals.releases > 0 ? 1 : signals.privilegeChanges > 0 ? 0.7 : 0,
+        escalation:
+          escalatedAfter === null ? 0 : clamp01(1 - escalatedAfter / ESCALATION_HORIZON_DAYS),
+        buildConcentration: clamp01(signals.buildSystemShare),
+        newness: clamp01(1 - signals.tenureDays / TENURE_HORIZON_DAYS),
+        // Package-level and crude on purpose: it says "somebody with no code lobbied for a
+        // handover before this account got one", not "this account arranged it".
+        pressure:
+          privilegeAt && !pressureIds.has(actorId) &&
+          pressure.some((p) => p.firstSeen <= privilegeAt)
+            ? 1
+            : 0,
+      }
+
+      const score =
+        (Object.keys(terms) as (keyof CandidateWeights)[]).reduce(
+          (sum, k) => sum + terms[k] * weights[k],
+          0,
+        ) / total
+
+      return { actorId, score, terms, signals }
+    })
+    // Ties break on actor id so the candidate list — and therefore the Bedrock spend — is the same
+    // on every run against the same memory.
+    .sort((a, b) => b.score - a.score || a.actorId.localeCompare(b.actorId))
+}
+
+/**
+ * Default number of candidates assessed per release.
+ *
+ * COST: every candidate is one Converse call (the arc summary) plus one embed call, so N=3 triples
+ * the Bedrock spend and roughly triples decision latency versus the old single-actor path. Three
+ * is a demo-speed compromise, not a detection claim — a real deployment watching a package with
+ * forty committers should raise it and pay for it, and `maxCandidates` / `SUSPECT_CANDIDATES` is
+ * there so that is a config change rather than a code change.
+ *
+ * SECOND COST, less obvious: N arcs are tested against thresholds fitted for classifying ONE arc,
+ * so the per-release false-positive exposure scales with N. `npm run bench` still measures what it
+ * always measured — one arc, one verdict — and does not measure this. Raising N buys coverage and
+ * pays for it in precision; the honest version of that trade is to recalibrate for the N in force.
+ */
+export const MAX_CANDIDATES = Number(process.env.SUSPECT_CANDIDATES ?? 3)
+
+/**
+ * Turns the ranking into the list that actually gets model calls spent on it.
+ *
+ * `mustInclude` is the actor of the event under assessment. Whoever produced the artifact is
+ * always assessed regardless of rank — they are, by definition, the account that just shipped —
+ * and that is derived from the event, not from configuration.
+ */
+export function selectCandidates(
+  ranked: Candidate[],
+  opts: { override?: string | null; mustInclude?: string | null; max?: number },
+): { actorIds: string[]; reason: string } {
+  const max = Math.max(1, opts.max ?? MAX_CANDIDATES)
+
+  if (opts.override) {
+    return {
+      actorIds: [opts.override],
+      reason: `pinned to ${opts.override} by SUSPECT_ACTOR — candidate ranking bypassed`,
+    }
+  }
+
+  const picked: string[] = []
+  if (opts.mustInclude) picked.push(opts.mustInclude)
+  for (const c of ranked) {
+    if (picked.length >= max) break
+    if (!picked.includes(c.actorId)) picked.push(c.actorId)
+  }
+
+  return {
+    actorIds: picked.slice(0, Math.max(max, opts.mustInclude ? 1 : 0)),
+    reason:
+      `${ranked.length} actor(s) in this package's memory, ranked by structural signals; ` +
+      `top ${Math.min(max, ranked.length)} assessed` +
+      (opts.mustInclude ? `, with the event's own actor (${opts.mustInclude}) always included` : ''),
+  }
+}
+
 /**
  * Builds the arc the decision is made on, reading the actor's history back out of CockroachDB.
  *
@@ -263,24 +468,27 @@ const RATIONALE_SYSTEM =
  * (tenure, privilege escalation, what the actor concentrates on), because a 90-day slice of this
  * attack is three innocuous commits. The premise of the project is that the signal only exists in
  * the multi-year arc, so the arc is what gets embedded.
+ *
+ * The package's history is passed in rather than fetched: `assess` already read it to enumerate
+ * candidates, and re-reading it once per candidate would be N identical full-package scans.
+ * Nothing is emitted from here — the caller assesses several candidates and only the one the
+ * decision belongs to is streamed to the UI.
  */
 async function buildArc(
   opts: ReplayOptions,
+  actorId: string,
   asOf: Date,
-  emit: Emit,
+  wholePackage: StoredEvent[],
   log: Logger,
-): Promise<{ embedding: number[]; summary: string; evidence: string[]; signals: ActorSignals }> {
+): Promise<{ embedding: number[]; summary: string; evidence: string[]; step: Step }> {
   const started = Date.now()
-  const history = await actorHistory(opts.packageId, opts.suspectActor, asOf)
-  const wholePackage = await packageHistory(opts.packageId, asOf)
+  const history = await actorHistory(opts.packageId, actorId, asOf)
   const window = arcWindow(asOf, opts.windowDays, 0)
   const recent = history.filter((e) => e.occurredAt >= window.windowStart)
   window.eventCount = recent.length
 
-  const signals = actorSignals(history, opts.suspectActor, asOf)
-  const pressure = pressureAccounts(wholePackage, asOf).filter(
-    (p) => p.actorId !== opts.suspectActor,
-  )
+  const signals = actorSignals(history, actorId, asOf)
+  const pressure = pressureAccounts(wholePackage, asOf).filter((p) => p.actorId !== actorId)
   const evidence = evidenceLines(signals, pressure)
 
   const prompt = composeArcPrompt({
@@ -293,11 +501,11 @@ async function buildArc(
 
   const summary = await converse(ARC_SYSTEM, prompt)
   const embedding = await embed(summary)
-  await upsertActorArc(opts.packageId, opts.suspectActor, window, summary, embedding)
+  await upsertActorArc(opts.packageId, actorId, window, summary, embedding)
 
-  await emit({
+  const step: Step = {
     type: 'arc',
-    actorId: opts.suspectActor,
+    actorId,
     summary,
     windowStart: window.windowStart.toISOString(),
     windowEnd: window.windowEnd.toISOString(),
@@ -305,10 +513,10 @@ async function buildArc(
     cumulativeEvents: history.length,
     signals,
     evidence,
-  })
+  }
 
   log.info('arc.built', {
-    actorId: opts.suspectActor,
+    actorId,
     windowEventCount: window.eventCount,
     cumulativeEvents: history.length,
     // Both prompt sizes, because a summary built on a truncated trajectory is a materially
@@ -319,7 +527,7 @@ async function buildArc(
     durMs: Date.now() - started,
   })
 
-  return { embedding, summary, evidence, signals }
+  return { embedding, summary, evidence, step }
 }
 
 async function composeHoldText(
@@ -354,9 +562,40 @@ async function composeHoldText(
   return { reason, advisory }
 }
 
+/** One candidate's complete assessment, held until the strongest of them is known. */
+type Assessment = {
+  actorId: string
+  decision: Decision
+  arc: { summary: string; evidence: string[]; step: Step }
+  explain: ExplainResult
+  neighbours: ScopedNeighbour[]
+  matches: PlaybookMatch[]
+}
+
+/**
+ * Which of two assessments the release should be judged on.
+ *
+ * A hold beats an allow; between two holds, the higher similarity to a known takeover shape wins,
+ * with the margin as the tiebreak. HONEST LIMIT: only the winner's hold is committed, so a package
+ * where two accounts independently trip the gate records one hold naming one of them. That is a
+ * real gap — it is bounded by the fact that the arc, the evidence and the audit row all name the
+ * actor they belong to, so the hold is never ambiguous about who it is about.
+ */
+function stronger(a: Assessment, b: Assessment): boolean {
+  if (a.decision.hold !== b.decision.hold) return a.decision.hold
+  if (a.decision.similarity !== b.decision.similarity) {
+    return a.decision.similarity > b.decision.similarity
+  }
+  return a.decision.margin > b.decision.margin
+}
+
 /**
  * Assessment fires on a release event: that is the moment a decision is actionable, and the
  * moment the real attack succeeded.
+ *
+ * Nobody names the account under assessment. The candidates are enumerated from the package's own
+ * memory, ranked structurally (`rankCandidates`), capped for cost, assessed independently, and the
+ * strongest decision is the one the release is judged on.
  */
 async function assess(
   opts: ReplayOptions,
@@ -364,29 +603,86 @@ async function assess(
   eventLandedAt: number,
   emit: Emit,
   log: Logger,
-): Promise<{ decision: Decision; holdId: string | null; prefixScoped: boolean; version: string; latencyMs: number }> {
+): Promise<{
+  decision: Decision
+  holdId: string | null
+  prefixScoped: boolean
+  version: string
+  latencyMs: number
+  actorId: string
+  assessedActors: string[]
+}> {
   const asOf = new Date(event.occurredAt)
   const version = extractVersion(event.content, asOf.toISOString().slice(0, 10))
 
-  const arc = await buildArc(opts, asOf, emit, log)
-
-  const retrievalStarted = Date.now()
-  const [explain, neighbours] = await Promise.all([
-    explainScoped(opts.packageId, arc.embedding),
-    scopedNeighbours(opts.packageId, arc.embedding, 5),
-  ])
-  await emit({ type: 'explain', explain, neighbours })
-  log.info('retrieval.explained', {
-    prefixScoped: explain.prefixScoped,
-    usedVectorIndex: explain.usedVectorIndex,
-    neighbours: neighbours.length,
-    durMs: Date.now() - retrievalStarted,
+  // Read once, here: the candidate enumeration, the ranking and every candidate's pressure-account
+  // evidence all come out of this same snapshot of the package's memory.
+  const wholePackage = await packageHistory(opts.packageId, asOf)
+  const ranked = rankCandidates(wholePackage, asOf)
+  const { actorIds, reason: selection } = selectCandidates(ranked, {
+    override: opts.suspectActor ?? null,
+    mustInclude: event.actorId,
+    max: opts.maxCandidates,
   })
 
-  const matches = await matchPlaybook(arc.embedding, 5)
-  await emit({ type: 'match', matches })
+  await emit({
+    type: 'candidates',
+    considered: ranked.length,
+    ranked,
+    assessed: actorIds,
+    reason: selection,
+  })
+  log.info('candidates.ranked', {
+    considered: ranked.length,
+    assessed: actorIds,
+    override: opts.suspectActor ?? null,
+    // The ordering key, so a run can be argued with after the fact rather than only watched.
+    scores: Object.fromEntries(ranked.map((c) => [c.actorId, Number(c.score.toFixed(4))])),
+    reason: selection,
+  })
 
-  const decision = decide(matches, opts.thresholds)
+  let best: Assessment | null = null
+  for (const actorId of actorIds) {
+    const arc = await buildArc(opts, actorId, asOf, wholePackage, log)
+
+    const retrievalStarted = Date.now()
+    const [explain, neighbours] = await Promise.all([
+      explainScoped(opts.packageId, arc.embedding),
+      scopedNeighbours(opts.packageId, arc.embedding, 5),
+    ])
+    log.info('retrieval.explained', {
+      actorId,
+      prefixScoped: explain.prefixScoped,
+      usedVectorIndex: explain.usedVectorIndex,
+      neighbours: neighbours.length,
+      durMs: Date.now() - retrievalStarted,
+    })
+
+    const matches = await matchPlaybook(arc.embedding, 5)
+    const decision = decide(matches, opts.thresholds)
+
+    log.info('candidate.assessed', {
+      actorId,
+      outcome: decision.hold ? 'hold' : 'allow',
+      similarity: Number(decision.similarity.toFixed(6)),
+      margin: Number(decision.margin.toFixed(6)),
+    })
+
+    const assessment: Assessment = { actorId, decision, arc, explain, neighbours, matches }
+    if (!best || stronger(assessment, best)) best = assessment
+  }
+
+  // `actorIds` is never empty — `selectCandidates` always returns at least the event's own actor —
+  // so this is a type narrowing, not a real branch.
+  if (!best) throw new Error('assess: no candidate was assessed')
+
+  const { decision, explain, neighbours, matches, arc } = best
+
+  // Only the winner is streamed: the UI renders one arc, one retrieval and one decision, and
+  // showing three of each would bury the one the hold is about.
+  await emit(arc.step)
+  await emit({ type: 'explain', explain, neighbours })
+  await emit({ type: 'match', matches })
   await emit({
     type: 'decision',
     decision,
@@ -409,6 +705,9 @@ async function assess(
   log.info('decision.made', {
     outcome: decision.hold ? 'hold' : 'allow',
     releaseVersion: version,
+    // Which candidate the release is being judged on, and which ones it beat to get there.
+    actorId: best.actorId,
+    assessedActors: actorIds,
     similarity: Number(decision.similarity.toFixed(6)),
     margin: Number(decision.margin.toFixed(6)),
     holdAt: decision.thresholds.holdAt,
@@ -421,7 +720,15 @@ async function assess(
   })
 
   if (!decision.hold) {
-    return { decision, holdId: null, prefixScoped: explain.prefixScoped, version, latencyMs: Date.now() - eventLandedAt }
+    return {
+      decision,
+      holdId: null,
+      prefixScoped: explain.prefixScoped,
+      version,
+      latencyMs: Date.now() - eventLandedAt,
+      actorId: best.actorId,
+      assessedActors: actorIds,
+    }
   }
 
   const { reason, advisory } = await composeHoldText(
@@ -467,7 +774,15 @@ async function assess(
     durMs: latencyMs,
   })
 
-  return { decision, holdId: result.holdId, prefixScoped: explain.prefixScoped, version, latencyMs }
+  return {
+    decision,
+    holdId: result.holdId,
+    prefixScoped: explain.prefixScoped,
+    version,
+    latencyMs,
+    actorId: best.actorId,
+    assessedActors: actorIds,
+  }
 }
 
 export async function runReplay(opts: ReplayOptions, emit: Emit): Promise<ReplaySummary> {
@@ -485,6 +800,8 @@ export async function runReplay(opts: ReplayOptions, emit: Emit): Promise<Replay
 
   const summary: ReplaySummary = {
     ingested: 0,
+    assessedActor: null,
+    assessedActors: [],
     holdId: null,
     heldAt: null,
     releaseVersion: null,
@@ -528,6 +845,8 @@ export async function runReplay(opts: ReplayOptions, emit: Emit): Promise<Replay
 
     const outcome = await assess(opts, event, started, emit, log)
     summary.decision = outcome.decision
+    summary.assessedActor = outcome.actorId
+    summary.assessedActors = outcome.assessedActors
     summary.prefixScoped = summary.prefixScoped || outcome.prefixScoped
     if (outcome.holdId) {
       summary.holdId = outcome.holdId

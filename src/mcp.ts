@@ -666,17 +666,47 @@ export function writeCapableTools(toolNames: string[]): string[] {
   })
 }
 
-/** Throws unless every advertised tool is read-shaped — the audit script's hard gate. */
-export function assertReadOnlyTools(toolNames: string[]): void {
+/**
+ * What the advertised tool list tells you about write capability — which, measured against the
+ * real server, is nothing.
+ *
+ * This function was originally a hard gate: refuse the session if any advertised tool can write,
+ * on the theory that a sufficiently narrow cluster role would produce a read-only tool list. The
+ * first run against `https://cockroachlabs.cloud/mcp` falsified that theory outright:
+ *
+ *   ORG_MEMBER only     tools/list = 12 tools incl. create_table/insert_rows; every CALL unauthorized
+ *   CLUSTER_DEVELOPER   tools/list = the same 12;                             every CALL unauthorized
+ *   CLUSTER_ADMIN       tools/list = the same 12;  select_query OK, and insert_rows reaches
+ *                                                  statement execution ("relation does not exist")
+ *
+ * Two conclusions, both load-bearing:
+ *
+ *   1. `tools/list` is NOT role-filtered. The same 12 tools are advertised to an identity that
+ *      cannot execute a single one of them. The tool list is a menu, not a permission set, so
+ *      gating on it tells you nothing about what the session can do.
+ *   2. There is no role that grants MCP read access WITHOUT write access. CLUSTER_DEVELOPER gets
+ *      nothing; CLUSTER_ADMIN gets everything. So "read-only at the protocol layer" is not merely
+ *      unproven here — it is unobtainable, and any claim resting on role choice is false.
+ *
+ * What actually keeps this path read-only is that this client implements only read tools and never
+ * builds a write statement. That is client-side discipline, not a boundary the server enforces on
+ * us — and the difference matters enough to say out loud rather than let a green check imply
+ * otherwise. A caller wanting a real boundary must put one at the SQL layer (see `gate_svc` in
+ * scripts/provision.sh) or in front of the credential.
+ *
+ * So this now REPORTS rather than throws. A gate that fires on every real session is not a gate;
+ * it is an outage with a security-shaped message, and it would have disabled the MCP path entirely
+ * against the only server it was written for.
+ */
+export function writeCapabilityReport(toolNames: string[]): string | null {
   const writers = writeCapableTools(toolNames)
-  if (writers.length) {
-    throw new McpToolError(
-      `This MCP session advertises write-capable tools: ${writers.join(', ')}. ` +
-        `The audit path is documented as read-only at the protocol layer, and that claim is only ` +
-        `true while the service account holds a read-only cluster role — check SLEEPER_MCP_ROLE in ` +
-        `scripts/provision.sh (default CLUSTER_DEVELOPER) and the grants on the service account.`,
-    )
-  }
+  if (!writers.length) return null
+  return (
+    `This MCP session advertises write-capable tools: ${writers.join(', ')}. ` +
+    `That is expected and is NOT a misconfiguration: tools/list is not role-filtered, and no ` +
+    `CockroachDB Cloud role grants MCP reads without also granting writes. This path stays ` +
+    `read-only because this client implements only read tools — not because the server stops us.`
+  )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -717,6 +747,13 @@ export type McpClientOptions = {
   endpoint?: string
   apiKey?: string
   clusterId?: string | null
+  /**
+   * Database sent with every tool call that declares the argument. Defaults to the one in
+   * DATABASE_URL. A session pinned by `mcp-cluster-id` is scoped to a CLUSTER and has no session
+   * database, so without this the server resolves table names somewhere else entirely and answers
+   * `relation "takeover_playbook" does not exist`.
+   */
+  database?: string
   /** Injected in tests; defaults to the SDK's Streamable HTTP transport against `endpoint`. */
   clientFactory?: () => Promise<McpLike>
 }
@@ -736,6 +773,19 @@ export class CockroachMcpClient implements SqlReader {
   readonly via = 'mcp' as const
   readonly reason: string
   readonly calls: string[] = []
+
+  /**
+   * What this session's advertised tool list says about write capability, if anything — set at
+   * connect time by `resolveSqlReader`. Surfaced rather than enforced, because the live server
+   * advertises write tools to every identity including ones that cannot call them; see
+   * `writeCapabilityReport`. Null means the menu was read-shaped, which against the real Cloud
+   * server it never is.
+   */
+  writeCapabilityNote: string | null = null
+
+  noteWriteCapability(note: string): void {
+    this.writeCapabilityNote = note
+  }
 
   private client: McpLike | null = null
   private toolIndex = new Map<string, McpToolDef>()
@@ -787,7 +837,27 @@ export class CockroachMcpClient implements SqlReader {
     // client that reports the second when it means the first sends you hunting the wrong one.
     const mcp = this.mcp()
     const tool = this.requireTool(name)
-    const args = shapeArguments(tool, params)
+
+    // `database` is injected here rather than threaded through select/explain/show/tableSchema,
+    // because the live server wants it on all four and wanting it is not optional in practice.
+    // Measured against https://cockroachlabs.cloud/mcp: select_query, explain_query and
+    // get_table_schema declare it REQUIRED; show_statement declares it optional and then fails
+    // table-scoped statements without it, because a session pinned by `mcp-cluster-id` has no
+    // session database to fall back on. One injection point means a new tool cannot forget it.
+    //
+    // Only injected when the server declares the property and the caller has not set it — the
+    // caller always wins, and a server that has never heard of `database` is never sent one.
+    // Deliberately `this.options.database` alone, never `config.databaseName()`: reading the
+    // environment in here would make the shape of an outgoing call depend on whether DATABASE_URL
+    // happens to be set in the process, which is exactly the kind of ambient coupling that makes a
+    // unit test pass on one machine and fail on another. Callers resolve it; see `resolveSqlReader`.
+    const declared = Object.keys(tool.inputSchema?.properties ?? {})
+    const withDatabase =
+      declared.includes('database') && params.database === undefined && this.options.database
+        ? { ...params, database: this.options.database }
+        : params
+
+    const args = shapeArguments(tool, withDatabase)
     this.calls.push(name)
     const result = await mcp.callTool({ name, arguments: args }, undefined, {
       timeout: MCP_QUERY_TIMEOUT_MS,
@@ -868,8 +938,19 @@ export class CockroachMcpClient implements SqlReader {
   }
 
   /** `show_statement` — SHOW-based introspection (session, cluster settings, indexes). */
-  async show(statement: string): Promise<string> {
-    return this.call(MCP_TOOLS.show, { sql: assertSingleStatement(statement) })
+  /**
+   * `database` matters more here than the server's schema suggests. It is marked optional — the
+   * note says "optional for cluster-level statements like SHOW DATABASES" — but a session pinned
+   * by `mcp-cluster-id` has no session database, so anything table-scoped
+   * (`SHOW INDEXES FROM takeover_playbook`) resolves against the wrong place and comes back as
+   * `relation "takeover_playbook" does not exist`. Optional in the schema, required in practice
+   * for every statement this project sends.
+   */
+  async show(statement: string, database?: string): Promise<string> {
+    return this.call(MCP_TOOLS.show, {
+      sql: assertSingleStatement(statement),
+      ...(database ? { database } : {}),
+    })
   }
 
   async close(): Promise<void> {
@@ -914,23 +995,27 @@ export async function resolveSqlReader(
       endpoint: mode.endpoint,
       apiKey: config.mcp.apiKey(env)!,
       clusterId: config.mcp.clusterId(env),
+      // Resolved here rather than inside the client, so the client stays a pure function of its
+      // options and the environment is read in exactly one place.
+      database: config.databaseName(env) ?? undefined,
       clientFactory,
     },
     mode.reason,
   )
   try {
     await client.connect()
-    // The read-only gate belongs on the path that actually runs, not only in the audit script.
-    // `assertReadOnlyTools` existed so the README's "read-only at the protocol layer" claim would
-    // be a property rather than a sentence, but `npm run mcp:audit` was the only caller — so
-    // `npm run explain`, GET /api/explain and GET /api/hold/:id would happily hand a distro
-    // packager evidence labelled read-only over a session advertising `insert_rows`.
+    // This used to be a hard gate: refuse a session advertising write tools and fall back to
+    // direct SQL, so nothing could be labelled read-only over a session offering `insert_rows`.
+    // Sound reasoning, wrong premise. The live server advertises the same 12 tools to every
+    // identity, including one that cannot execute any of them, so the gate fired on EVERY real
+    // session — it would have silently disabled the MCP path against the only server it exists
+    // for, while printing a security-shaped reason that made the outage look intentional.
     //
-    // It throws inside the try deliberately: a write-capable session then becomes the same loud,
-    // reasoned fallback to direct SQL as an auth failure, with the reason naming the tools. That
-    // is the right trade here — the packager still gets the evidence, over a transport that is
-    // read-only because it is our own SELECT-only pool, and the label stops being a lie.
-    assertReadOnlyTools(client.availableTools())
+    // See `writeCapabilityReport` for the measurements. The honest handling is to record what the
+    // session advertises and carry on: the read-only property of this path comes from this client
+    // implementing only read tools, and that is true regardless of what the menu says.
+    const capability = writeCapabilityReport(client.availableTools())
+    if (capability) client.noteWriteCapability(capability)
     return client
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)

@@ -63,6 +63,16 @@ const BIND_HOST = process.env.SLEEPER_BIND_HOST ?? '127.0.0.1'
 /** One replay at a time: they all write to the same package's memory and would interleave. */
 let replayInFlight = false
 
+/**
+ * The actor the last replay in this process actually assessed.
+ *
+ * `/api/explain` re-runs the prefix-scoped query using a stored arc's embedding, so it has to name
+ * an actor — and now that the agent chooses the actor itself, the answer is whichever candidate
+ * the last replay landed on, not a configured one. Null until a replay has run, which is exactly
+ * the case the 404 below already covers.
+ */
+let lastAssessedActor: string | null = null
+
 function json(
   res: ServerResponse,
   status: number,
@@ -272,7 +282,9 @@ async function handleReplay(res: ServerResponse, corrId: string): Promise<void> 
     const summary = await runReplay(
       {
         packageId: timeline.packageId,
-        suspectActor: config.suspectActor,
+        // Unset unless SUSPECT_ACTOR pins it: the demo does not tell the agent whom to suspect.
+        suspectActor: config.suspectActorOverride,
+        maxCandidates: config.maxCandidates,
         windowDays: config.arcWindowDays,
         thresholds,
         events: timeline.events,
@@ -283,6 +295,7 @@ async function handleReplay(res: ServerResponse, corrId: string): Promise<void> 
       },
     )
 
+    lastAssessedActor = summary.assessedActor
     send('summary', summary)
   } catch (err) {
     // The stream is already open, so an error has to travel as an event rather than a status code.
@@ -304,7 +317,10 @@ async function handleReplay(res: ServerResponse, corrId: string): Promise<void> 
  * resolved, and the response names it, so what the demo shows is the path that actually served it.
  */
 async function handleExplain(res: ServerResponse, corrId: string): Promise<void> {
-  const arc = await loadActorArc(config.packageId, config.suspectActor)
+  // The actor this replay chose, if one has run; otherwise the inspection fallback, which only
+  // matters on a cluster warmed by some earlier process.
+  const actorId = lastAssessedActor ?? config.suspectActor
+  const arc = await loadActorArc(config.packageId, actorId)
   if (!arc) {
     json(res, 404, { error: 'no_actor_arc', message: 'No actor arc yet — run a replay first.' })
     return
@@ -315,6 +331,7 @@ async function handleExplain(res: ServerResponse, corrId: string): Promise<void>
   try {
     const explain = await explainScopedVia(reader, config.packageId, arc.embedding)
     createLogger({ corrId, packageId: config.packageId }).info('retrieval.explained', {
+      actorId,
       prefixScoped: explain.prefixScoped,
       usedVectorIndex: explain.usedVectorIndex,
       via: reader.via,
@@ -322,6 +339,8 @@ async function handleExplain(res: ServerResponse, corrId: string): Promise<void>
     })
     json(res, 200, {
       ...explain,
+      // Named in the response because the arc being explained is now the agent's own choice.
+      actorId,
       audit: { via: reader.via, reason: reader.reason, calls: [...reader.calls] },
     })
   } finally {

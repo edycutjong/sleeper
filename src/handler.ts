@@ -131,10 +131,11 @@ export async function ingestHandler(event: WebhookEvent): Promise<LambdaResponse
         // against package B's memory.
         packageId: parsed.packageId,
         // Consequence of making the package per-event: the assessed actor has to be per-event too.
-        // `config.suspectActor` is a replay concept — "which account does the xz timeline assess" —
-        // and pairing it with a per-event package would assess `jia-tan`'s arc inside whatever
-        // package the webhook happened to name. For a single inbound event the actor who produced
-        // it is the actor to assess.
+        // For a single inbound event the actor who produced it is the actor to assess, and pinning
+        // it here is not the thing `assess()` was fixed to stop doing — it is a fact of the
+        // payload, not a name someone configured. It also keeps the webhook to one arc per event:
+        // candidate ranking over the whole package would spend N model calls on every commit that
+        // arrives, and a webhook fires thousands of times a day.
         suspectActor: parsed.actorId,
         windowDays: config.arcWindowDays,
         thresholds,
@@ -173,7 +174,9 @@ export async function replayHandler(): Promise<LambdaResponse> {
     const summary = await runReplay(
       {
         packageId: timeline.packageId,
-        suspectActor: config.suspectActor,
+        // Nothing named: the corpus replay picks its own candidates out of memory.
+        suspectActor: config.suspectActorOverride,
+        maxCandidates: config.maxCandidates,
         windowDays: config.arcWindowDays,
         thresholds,
         events: timeline.events,

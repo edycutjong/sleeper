@@ -27,7 +27,7 @@ import {
   MCP_MAX_STATEMENT_CHARS,
   MCP_TOOLS,
   McpLimitError,
-  assertReadOnlyTools,
+  writeCapabilityReport,
   assertSingleStatement,
   hasExplicitLimit,
   planProbeVector,
@@ -112,7 +112,12 @@ async function main(): Promise<void> {
   )
 
   const client = new CockroachMcpClient(
-    { endpoint: mode.endpoint, apiKey: config.mcp.apiKey()!, clusterId: config.mcp.clusterId() },
+    {
+      endpoint: mode.endpoint,
+      apiKey: config.mcp.apiKey()!,
+      clusterId: config.mcp.clusterId(),
+      database: config.databaseName() ?? undefined,
+    },
     mode.reason,
   )
 
@@ -134,23 +139,39 @@ async function main(): Promise<void> {
     // is a property of the service account's cluster role, not of the transport, and nothing used
     // to verify it — so it is checked here against what the server actually advertises.
     //
-    // A write tool aborts the audit rather than warning. Everything printed after this point is
-    // described as read-only evidence; printing it under a session that can write would be
-    // reassuring and wrong.
-    try {
-      assertReadOnlyTools(client.availableTools())
-      console.log('  ✓ read-only: no write-capable tool name is advertised to this session')
-    } catch (err) {
-      console.error(`\n  ✗ READ-ONLY CLAIM BROKEN — ${err instanceof Error ? err.message : String(err)}`)
-      console.error(`\n  Advertised: ${client.availableTools().join(', ')}`)
-      console.error(`  Write-capable: ${writeCapableTools(client.availableTools()).join(', ')}`)
-      console.error('  Aborting: the rest of this audit would present itself as read-only evidence.')
-      process.exitCode = 1
-      return
+    // This aborted the audit until the first run against the real server, on the theory that a
+    // read-only cluster role would produce a read-only tool list. It does not. Measured:
+    //
+    //   ORG_MEMBER          same 12 tools advertised;  every call -> unauthorized
+    //   CLUSTER_DEVELOPER   same 12 tools advertised;  every call -> unauthorized
+    //   CLUSTER_ADMIN       same 12 tools advertised;  select_query OK, insert_rows reaches
+    //                       statement execution ("relation does not exist")
+    //
+    // So the tool list is a menu rather than a permission set, and no role grants MCP reads
+    // without writes. Aborting here would have disabled the audit against every real session
+    // while printing a security-shaped reason for it. Report the truth and continue.
+    const capability = writeCapabilityReport(client.availableTools())
+    if (!capability) {
+      console.log('  ✓ no write-capable tool name is advertised to this session')
+    } else {
+      console.log(`\n  ⓘ ${capability}`)
+      console.log(`\n  Advertised:    ${client.availableTools().join(', ')}`)
+      console.log(`  Write-capable: ${writeCapableTools(client.availableTools()).join(', ')}`)
+      console.log(
+        '\n  What keeps the evidence below read-only is that this client builds only SELECT,\n' +
+          '  EXPLAIN and SHOW statements — not the tool list, and not the role. A boundary you\n' +
+          '  want enforced belongs at the SQL layer (see gate_svc) or in front of the credential.',
+      )
     }
 
     rule(`2. ${MCP_TOOLS.show} — SHOW introspection through the server`)
-    console.log(indent(await client.show('SHOW DATABASE')))
+    // NOT `SHOW DATABASE`: the live server answers that with
+    // `SHOW statement type "SHOW" is not allowed`. `show_statement` accepts an introspection
+    // subset — the tool's own description names SHOW SCHEMAS / INDEXES / REGIONS / CONSTRAINTS —
+    // and a bare `SHOW <session var>` is not in it. Nothing local surfaces that; it took the first
+    // real call to find. `SHOW INDEXES` is the better choice anyway: it makes the server itself
+    // describe the vector index the whole decision path depends on.
+    console.log(indent(await client.show('SHOW INDEXES FROM takeover_playbook', config.databaseName() ?? undefined)))
 
     rule(`3. ${MCP_TOOLS.tableSchema} — the evidence tables, as the cluster describes them`)
     // The session is pinned to a CLUSTER, not a database, so the database is named explicitly —

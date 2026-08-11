@@ -20,7 +20,7 @@ import {
   McpResultError,
   McpToolError,
   McpValueError,
-  assertReadOnlyTools,
+  writeCapabilityReport,
   assertSingleStatement,
   assertUuid,
   hasExplicitLimit,
@@ -633,7 +633,7 @@ describe('CockroachMcpClient — request shaping and limits, end to end without 
 describe('the read-only claim, checked instead of asserted', () => {
   it('accepts the four read tools this project drives', () => {
     expect(writeCapableTools(Object.values(MCP_TOOLS))).toEqual([])
-    expect(() => assertReadOnlyTools(Object.values(MCP_TOOLS))).not.toThrow()
+    expect(writeCapabilityReport(Object.values(MCP_TOOLS))).toBeNull()
   })
 
   it('flags a write tool by name', () => {
@@ -652,14 +652,22 @@ describe('the read-only claim, checked instead of asserted', () => {
   // What `npm run mcp:audit` does with the same call: the README tells a distro packager the audit
   // path is read-only at the protocol layer, and that is only true while the service account holds
   // a read-only cluster role. A session advertising insert_rows must fail the audit, not warn.
-  it('fails on a session that advertises a write tool, naming the role to fix', async () => {
+  // This used to assert a throw, and the throw named a cluster role to go and fix. The first run
+  // against the real Cloud server showed there is nothing to fix: the same 12 tools are advertised
+  // to every identity, including one that cannot execute a single call. So the report says the
+  // advertisement is expected, and says where the real boundary is instead of implying the tool
+  // list is one.
+  it('reports a write-capable session without pretending it is misconfigured', async () => {
     const { client } = await connected({
       tools: [...SERVER_TOOLS, toolDef('insert_rows', { table: {}, rows: {} }, ['table', 'rows'])],
     })
     expect(client.availableTools()).toContain('insert_rows')
-    expect(() => assertReadOnlyTools(client.availableTools())).toThrow(McpToolError)
-    expect(() => assertReadOnlyTools(client.availableTools())).toThrow(/insert_rows/)
-    expect(() => assertReadOnlyTools(client.availableTools())).toThrow(/SLEEPER_MCP_ROLE/)
+    const report = writeCapabilityReport(client.availableTools())
+    expect(report).toContain('insert_rows')
+    expect(report).toMatch(/NOT a misconfiguration/i)
+    expect(report).toMatch(/implements only read tools/i)
+    // The old message sent the reader to a role setting that cannot deliver what it promised.
+    expect(report).not.toMatch(/SLEEPER_MCP_ROLE/)
   })
 })
 
@@ -731,12 +739,18 @@ describe('resolveSqlReader — the fallback is explicit, never silent', () => {
     expect(reader.reason).toContain('fell back to direct SQL')
   })
 
-  // `assertReadOnlyTools` existed so the README's "read-only at the protocol layer" claim would be
-  // a property rather than a sentence — but `npm run mcp:audit` was its only caller, and the audit
-  // script is not the runtime path. `npm run explain`, GET /api/explain and GET /api/hold/:id all
-  // arrive here, and all three used to hand a distro packager evidence labelled read-only over a
-  // session advertising `insert_rows`. The gate is on this path now, so the label is earned.
-  it('refuses to label a write-capable session read-only, and falls back naming the tool', async () => {
+  // This test used to assert the opposite, and asserting the opposite was a bug.
+  //
+  // The reasoning was: never label evidence read-only over a session advertising `insert_rows`, so
+  // fall back to direct SQL. Correct in the abstract, wrong about this server. Against the real
+  // Cloud endpoint every session advertises `create_database`, `create_table` and `insert_rows` —
+  // including a service account with no cluster role at all, which cannot execute one of them. So
+  // this fallback fired on 100% of real sessions: the MCP path would have been dead in production
+  // while the reason string blamed a role setting that cannot change the outcome.
+  //
+  // The advertisement is recorded and the session is used. What makes this path read-only is that
+  // the client only ever builds SELECT, EXPLAIN and SHOW.
+  it('uses a write-capable session, and records what it advertised', async () => {
     const server = fakeServer({
       tools: [...SERVER_TOOLS, toolDef('insert_rows', { table: {}, rows: {} }, ['table', 'rows'])],
     })
@@ -745,12 +759,10 @@ describe('resolveSqlReader — the fallback is explicit, never silent', () => {
       { COCKROACH_MCP_API_KEY: 'sk', COCKROACH_CLUSTER_ID: 'cl-1' },
       async () => server.client,
     )
-    expect(reader.via).toBe('direct')
-    expect(reader.reason).toContain('insert_rows')
-    expect(reader.reason).toContain('SLEEPER_MCP_ROLE')
-    expect(reader.reason).toContain('fell back to direct SQL')
-    // The rejected session is closed rather than left dangling on a transport nobody will read.
-    expect(server.isClosed()).toBe(true)
+    expect(reader.via).toBe('mcp')
+    expect((reader as CockroachMcpClient).writeCapabilityNote).toContain('insert_rows')
+    expect((reader as CockroachMcpClient).writeCapabilityNote).toMatch(/NOT a misconfiguration/i)
+    expect(server.isClosed()).toBe(false)
   })
 
   // The mirror of the test above: the gate must not cost the MCP path its normal case.

@@ -27,6 +27,31 @@ function render(step: Step): void {
       console.log(step.message)
       break
 
+    case 'candidates':
+      rule(
+        config.suspectActorOverride
+          ? 'CANDIDATE ACTORS — RANKING SHOWN, BUT PINNED BY SUSPECT_ACTOR'
+          : 'CANDIDATE ACTORS — DERIVED FROM MEMORY, NOT CONFIGURED',
+      )
+      console.log(`  ${step.reason}\n`)
+      console.log(
+        `  ${'actor'.padEnd(16)}${'score'.padEnd(8)}ship  escal  build  new   pressure`,
+      )
+      for (const c of step.ranked) {
+        const t = c.terms
+        const mark = step.assessed.includes(c.actorId) ? '→' : ' '
+        console.log(
+          `  ${mark} ${c.actorId.padEnd(14)}${c.score.toFixed(3).padEnd(8)}` +
+            `${t.canShip.toFixed(2)}  ${t.escalation.toFixed(2)}   ${t.buildConcentration.toFixed(2)}   ` +
+            `${t.newness.toFixed(2)}  ${t.pressure.toFixed(2)}`,
+        )
+      }
+      console.log(
+        `\n  Ranking orders the candidates and caps the spend. It does NOT decide: the hold\n` +
+          `  decision below is made on playbook similarity alone.`,
+      )
+      break
+
     case 'event': {
       const date = step.event.occurredAt.slice(0, 10)
       const marker = step.afterHold ? '·' : '+'
@@ -113,7 +138,10 @@ async function main(): Promise<void> {
   const summary = await runReplay(
     {
       packageId: timeline.packageId,
-      suspectActor: config.suspectActor,
+      // No suspect is named unless SUSPECT_ACTOR was set: the agent enumerates the candidates
+      // from the memory it just ingested and ranks them itself.
+      suspectActor: config.suspectActorOverride,
+      maxCandidates: config.maxCandidates,
       windowDays: config.arcWindowDays,
       thresholds,
       events: timeline.events,
@@ -124,6 +152,13 @@ async function main(): Promise<void> {
   rule('OUTCOME')
   console.log(`  events ingested:  ${summary.ingested}`)
   console.log(`  prefix-scoped:    ${summary.prefixScoped ? 'proven by EXPLAIN' : 'NOT PROVEN'}`)
+  console.log(
+    `  actor assessed:   ${summary.assessedActor ?? 'none'}` +
+      (summary.assessedActors.length > 1
+        ? `  (selected from ${summary.assessedActors.join(', ')})`
+        : '') +
+      (config.suspectActorOverride ? '  [pinned by SUSPECT_ACTOR]' : '  [chosen from memory]'),
+  )
 
   if (summary.holdId && summary.heldAt) {
     const daysEarlier = Math.round(

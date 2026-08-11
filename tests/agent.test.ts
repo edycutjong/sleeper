@@ -1,7 +1,9 @@
 /**
  * Agent-loop tests that need neither a cluster nor a model.
  *
- * Three groups:
+ * Four groups:
+ *  - candidate selection: proof that with nothing configured, the agent picks the account to assess
+ *    out of the corpus itself — the one test that decides whether this project is what it claims;
  *  - prompt-injection hardening: the arc prompt is composed by a pure function, so the defences are
  *    asserted on the exact string Bedrock would receive rather than on a model's reaction to it;
  *  - trajectory bounding: proof that a 10k-event history does not serialise 10k lines into a prompt;
@@ -9,14 +11,18 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  CANDIDATE_WEIGHTS,
   MAX_PROMPT_EVENTS,
   REDACTION,
   UNTRUSTED_CLOSE,
   UNTRUSTED_OPEN,
   composeArcPrompt,
   neutralise,
+  rankCandidates,
+  selectCandidates,
   tailWithCount,
 } from '../src/agent.js'
+import { loadTimeline } from '../src/corpus.js'
 import { isRetryable, withRetry } from '../src/bedrock.js'
 import { setLogSink, type LogLine } from '../src/log.js'
 import type { StoredEvent } from '../src/memory.js'
@@ -57,6 +63,135 @@ function prompt(events: StoredEvent[], history = events): string {
     history,
   })
 }
+
+describe('candidate selection with nothing configured', () => {
+  /**
+   * The bundled xz corpus, shaped as rows read back out of CockroachDB. Nothing here says which
+   * account matters: `rankCandidates` gets the same six actors the cluster would hand it.
+   */
+  const corpus: StoredEvent[] = loadTimeline().events.map((e, i) => ({
+    id: `corpus-${i}`,
+    packageId: e.packageId,
+    actorId: e.actorId,
+    kind: e.kind,
+    content: e.content,
+    occurredAt: new Date(e.occurredAt),
+    sourceUrl: null,
+  }))
+
+  /** The 5.6.0 tarball — the moment the real attack succeeded and the gate has to be right. */
+  const RELEASE_5_6_0 = new Date('2024-02-24T00:00:00Z')
+
+  const rankOf = (ranked: { actorId: string }[], actorId: string): number =>
+    ranked.findIndex((c) => c.actorId === actorId)
+
+  it('picks jia-tan over lasse-collin out of the corpus, with no suspect configured', () => {
+    const ranked = rankCandidates(corpus, RELEASE_5_6_0)
+
+    // Every actor with events by then, enumerated from memory — including the maintainer, the two
+    // pressure accounts and the IFUNC contributor.
+    expect(ranked.map((c) => c.actorId).sort()).toEqual([
+      'dennis-ens',
+      'hans-jansen',
+      'jia-tan',
+      'jigar-kumar',
+      'lasse-collin',
+    ])
+
+    expect(ranked[0]!.actorId).toBe('jia-tan')
+    expect(rankOf(ranked, 'jia-tan')).toBeLessThan(rankOf(ranked, 'lasse-collin'))
+
+    // Not a photo finish: the account that shipped the backdoor scores roughly twice the project's
+    // founder and sole maintainer of a decade.
+    const jia = ranked.find((c) => c.actorId === 'jia-tan')!
+    const lasse = ranked.find((c) => c.actorId === 'lasse-collin')!
+    expect(jia.score - lasse.score).toBeGreaterThan(0.2)
+  })
+
+  it('holds under uniform weights, so the answer is not an artefact of the weighting', () => {
+    // If the ordering only survives the weights that were shipped, the weights were fitted to the
+    // known answer and the ranking is worth nothing. Flatten them and check.
+    const uniform = { canShip: 1, escalation: 1, buildConcentration: 1, newness: 1, pressure: 1 }
+    const ranked = rankCandidates(corpus, RELEASE_5_6_0, uniform)
+    expect(ranked[0]!.actorId).toBe('jia-tan')
+    expect(rankOf(ranked, 'jia-tan')).toBeLessThan(rankOf(ranked, 'lasse-collin'))
+  })
+
+  it('does not depend on the escalation term, which the corpus scores backwards', () => {
+    /**
+     * HONEST FINDING, asserted so it cannot be quietly forgotten.
+     *
+     * `daysFromFirstActivityToPrivilege` in src/signals.ts is keyword-driven: any event whose text
+     * contains "maintainer" counts as a privileged moment. Lasse Collin's first commit describes
+     * him as "the long-time sole maintainer", and the two pressure accounts open by demanding a
+     * new maintainer — so all three are scored as having escalated on day zero and take a PERFECT
+     * escalation score, while jia-tan, who really did escalate, scores lower for having taken 188
+     * days about it. The term is upside down on this corpus.
+     *
+     * It stays because it was written down before the corpus was run and reversing it afterwards
+     * is how a ranking gets fitted. What matters is that the result does not rest on it: zero the
+     * weight and the ordering is unchanged.
+     */
+    const jia = rankCandidates(corpus, RELEASE_5_6_0).find((c) => c.actorId === 'jia-tan')!
+    const lasse = rankCandidates(corpus, RELEASE_5_6_0).find((c) => c.actorId === 'lasse-collin')!
+    expect(jia.terms.escalation).toBeLessThan(lasse.terms.escalation)
+
+    const withoutEscalation = rankCandidates(corpus, RELEASE_5_6_0, {
+      ...CANDIDATE_WEIGHTS,
+      escalation: 0,
+    })
+    expect(withoutEscalation[0]!.actorId).toBe('jia-tan')
+    expect(rankOf(withoutEscalation, 'jia-tan')).toBeLessThan(
+      rankOf(withoutEscalation, 'lasse-collin'),
+    )
+  })
+
+  it('ranks on the memory available at the time, not on hindsight', () => {
+    // At the first release jia-tan has one release and two privilege changes and still leads;
+    // hans-jansen has not appeared yet and is not a candidate.
+    const ranked = rankCandidates(corpus, new Date('2023-05-04T00:00:00Z'))
+    expect(ranked[0]!.actorId).toBe('jia-tan')
+    expect(ranked.map((c) => c.actorId)).not.toContain('hans-jansen')
+  })
+
+  it('assesses the top N plus the actor of the event under assessment', () => {
+    const ranked = rankCandidates(corpus, RELEASE_5_6_0)
+    const { actorIds } = selectCandidates(ranked, { mustInclude: 'hans-jansen', max: 3 })
+
+    // Whoever produced the artifact is always assessed, however they rank — that comes from the
+    // event, not from configuration.
+    expect(actorIds).toContain('hans-jansen')
+    expect(actorIds).toHaveLength(3)
+    expect(actorIds[1]).toBe('jia-tan')
+    expect(new Set(actorIds).size).toBe(actorIds.length)
+  })
+
+  it('spends model calls on exactly N candidates, because each one costs two', () => {
+    const ranked = rankCandidates(corpus, RELEASE_5_6_0)
+    expect(selectCandidates(ranked, { max: 1 }).actorIds).toEqual(['jia-tan'])
+    expect(selectCandidates(ranked, { max: 5 }).actorIds).toHaveLength(5)
+  })
+
+  it('still lets SUSPECT_ACTOR pin one account for a deterministic demo', () => {
+    const ranked = rankCandidates(corpus, RELEASE_5_6_0)
+    const pinned = selectCandidates(ranked, {
+      override: 'lasse-collin',
+      mustInclude: 'jia-tan',
+      max: 3,
+    })
+    expect(pinned.actorIds).toEqual(['lasse-collin'])
+    expect(pinned.reason).toContain('SUSPECT_ACTOR')
+  })
+
+  it('is an ordering key and never a verdict', async () => {
+    // The thesis: structural signals are evidence, not votes. `decide()` takes playbook matches and
+    // thresholds — nothing else — and this asserts on the source so a future change cannot quietly
+    // feed a candidate score into the hold decision.
+    const { readFileSync } = await import('node:fs')
+    const source = readFileSync(new URL('../src/decide.ts', import.meta.url), 'utf8')
+    expect(source).not.toMatch(/Candidate|rankCandidates|signals/)
+  })
+})
 
 describe('prompt injection hardening (C7)', () => {
   // The attack the whole design is exposed to: the assessed account authors the evidence.
