@@ -95,29 +95,204 @@ function json(
 }
 
 /**
- * Resolves the audit read path and reports which one it is.
+ * How long one resolved audit reader is reused before the path is resolved again.
  *
- * The reader is closed immediately: this exists so `/api/state` and the UI header can say whether
- * the Managed MCP Server is the path in force, and holding a session open between requests would
- * make the answer stale rather than live. When MCP is not configured `resolveMcpMode` returns
- * before anything is dialled, so the default demo pays nothing for this.
+ * This used to be per request, and per request it dialled a third party. `auditReader()` →
+ * `resolveSqlReader` opens a Streamable HTTP session to `https://cockroachlabs.cloud/mcp` and reads
+ * `tools/list` before it can answer, so with COCKROACH_MCP_API_KEY set, `/api/state` — the call the
+ * page makes on load, before anything has been clicked — measured 0.90–1.06 s against
+ * `/api/health`'s 0.0015 s, and `/api/explain` 1.6 s idle. A page load's latency was a round trip
+ * to somebody else's cloud, and the suite had already started timing out on it.
+ *
+ * 30 seconds, and the number follows from what the resolution is a function of. Two inputs:
+ * process env (COCKROACH_MCP_API_KEY, COCKROACH_CLUSTER_ID, SLEEPER_MCP) — which cannot change
+ * inside a running process at all — and whether cockroachlabs.cloud is reachable, which can. So the
+ * TTL is only ever trading staleness about *reachability*:
+ *
+ *   - long enough that one page load (state + explain + a hold read) and a judge clicking around
+ *     for a few seconds all share a single resolution, which is the whole point;
+ *   - short enough that a transient MCP outage self-heals inside one demo beat rather than pinning
+ *     the header to "direct SQL" for the rest of the process — 30 s is well under the time it takes
+ *     to notice a wrong banner and re-run;
+ *   - short enough that a shared MCP session is not being held open long enough for server-side
+ *     idle expiry to be the realistic failure mode (and if it is one anyway, a failed call retires
+ *     the session — see `releaseAuditSession`).
+ *
+ * Honest about the cost: `audit.via`/`audit.reason` are now up to 30 s stale with respect to MCP
+ * reachability. They are never stale about which path *served this request* — that is read off the
+ * reader that actually ran the statement, which is the property the UI header claims.
+ *
+ * SLEEPER_AUDIT_TTL_MS overrides it, and `0` restores the old resolve-per-request behaviour exactly
+ * — which is how the fallback and recovery paths above were exercised without waiting 30 s for each
+ * one. An unparseable value falls back to the default rather than to `NaN`, because every comparison
+ * against `NaN` is false and the quiet result would be a cache that never hits.
  */
-async function describeAuditPath(): Promise<{ via: 'mcp' | 'direct'; reason: string }> {
-  const reader = await auditReader()
+const AUDIT_READER_TTL_MS = ((): number => {
+  const raw = Number(process.env.SLEEPER_AUDIT_TTL_MS ?? 30_000)
+  return Number.isFinite(raw) && raw >= 0 ? raw : 30_000
+})()
+
+/**
+ * One resolved reader, shared by every request inside a TTL window.
+ *
+ * Lease-counted rather than closed on a timer. The MCP reader owns a live session, and a session
+ * closed underneath a request that is mid-statement turns a cache into a new class of 500 — so a
+ * superseded session is marked `retired` (no new leases) and closed by whichever request lets go of
+ * it last.
+ */
+type AuditSession = {
+  reader: SqlReader
+  /** Instant after which this session is no longer handed out. */
+  expiresAt: number
+  /** Requests currently holding it. */
+  leases: number
+  /** Superseded or invalidated: hand out no more leases, close at zero. */
+  retired: boolean
+  /** `close()` already called — the retire path can be reached twice. */
+  closing: boolean
+}
+
+let auditSession: AuditSession | null = null
+
+/**
+ * The resolution in flight, if any, so a burst of requests arriving on a cold cache produces ONE
+ * dial rather than one each. Cleared on both settle paths.
+ */
+let auditResolving: Promise<AuditSession> | null = null
+
+/**
+ * Hands out a lease on a resolved reader, resolving one if the cache is cold or expired.
+ *
+ * Nothing is cached on the failure path: if `auditReader()` rejects, `auditResolving` is cleared,
+ * `auditSession` stays as it was (null, since an expired session is retired before this runs) and
+ * the next request tries again. A *fallback* is not a rejection — `resolveSqlReader` answers a
+ * failed MCP connect with a direct-SQL reader whose `reason` names the error — and that IS cached,
+ * for the same TTL and no longer: reported as the direct path it is, never as MCP, and re-resolved
+ * within 30 s so a transient outage cannot wedge the process into permanent fallback.
+ */
+async function acquireAuditSession(): Promise<AuditSession> {
+  const live = auditSession
+  if (live && !live.retired && live.expiresAt > Date.now()) {
+    live.leases++
+    return live
+  }
+  // Expired or already invalidated: stop handing it out now, close it when its last reader is done.
+  if (live) retireAuditSession(live)
+
+  if (!auditResolving) {
+    auditResolving = auditReader()
+      .then((reader) => {
+        noteAuditPath(reader)
+        const session: AuditSession = {
+          reader,
+          expiresAt: Date.now() + AUDIT_READER_TTL_MS,
+          leases: 0,
+          retired: false,
+          closing: false,
+        }
+        auditSession = session
+        return session
+      })
+      .finally(() => {
+        auditResolving = null
+      })
+  }
+
+  const session = await auditResolving
+  session.leases++
+  return session
+}
+
+function retireAuditSession(session: AuditSession): void {
+  session.retired = true
+  if (auditSession === session) auditSession = null
+  closeIfIdle(session)
+}
+
+function closeIfIdle(session: AuditSession): void {
+  if (!session.retired || session.leases > 0 || session.closing) return
+  session.closing = true
+  // A reader that cannot be closed is not worth failing a request over — it is already off the
+  // cache and unreachable — but it is worth a line, because leaking MCP sessions is how a long
+  // demo run ends up rate-limited.
+  void session.reader.close().catch((err) => recordFailure('audit.reader_close_failed', err))
+}
+
+/**
+ * `failed` is not bookkeeping: it is the recovery path.
+ *
+ * A shared reader is state, and the one thing that can go wrong with reusing it — an MCP session the
+ * far end has since dropped — presents as a throw from the statement, not from the resolution. So a
+ * request that failed while holding the session takes the session out of the cache on its way out,
+ * and the next request resolves a fresh one. It does not retry in-band: a second dial inside the
+ * same request is the cost this cache exists to remove, and one 500 is cheaper than reintroducing it
+ * on every genuinely-bad statement.
+ */
+function releaseAuditSession(session: AuditSession, failed: boolean): void {
+  session.leases--
+  if (failed) retireAuditSession(session)
+  else closeIfIdle(session)
+}
+
+/** A leased reader plus the calls THIS request made through it. */
+type LeasedReader = {
+  reader: SqlReader
+  /**
+   * The shared reader's `calls` log, sliced from where this request found it.
+   *
+   * Two honest limits. `tools/list` is pushed during connect, so it belongs to the session rather
+   * than to any one request and no longer appears here — `calls` is now "what this request ran",
+   * which is what the field claimed all along. And two genuinely concurrent audit reads over the
+   * same session will each see the other's calls in their slice; this is a single-page demo server
+   * where that does not arise, and the alternative is a per-request client, i.e. the defect.
+   */
+  calls: () => string[]
+}
+
+/**
+ * Runs `use` against a leased reader, releasing it — and never closing the shared one — afterwards.
+ */
+async function withAuditReader<T>(use: (leased: LeasedReader) => Promise<T>): Promise<T> {
+  const session = await acquireAuditSession()
+  const from = session.reader.calls.length
+  let failed = false
   try {
-    noteAuditPath(reader)
-    return { via: reader.via, reason: reader.reason }
+    return await use({
+      reader: session.reader,
+      calls: () => session.reader.calls.slice(from),
+    })
+  } catch (err) {
+    failed = true
+    throw err
   } finally {
-    await reader.close()
+    releaseAuditSession(session, failed)
   }
 }
 
 /**
- * Logs `mcp.fallback` whenever the audit read did NOT go over the Managed MCP Server.
+ * Resolves the audit read path and reports which one it is.
+ *
+ * Reads `via`/`reason` off the reader that is actually in force rather than off `resolveMcpMode`,
+ * so a configured-but-unreachable MCP path still reports `direct` here — the cache changes when the
+ * resolution happens, not what it is allowed to claim.
+ */
+async function describeAuditPath(): Promise<{ via: 'mcp' | 'direct'; reason: string }> {
+  return withAuditReader(async ({ reader }) => ({
+    via: reader.via,
+    reason: withoutClusterId(reader.reason),
+  }))
+}
+
+/**
+ * Logs `mcp.fallback` whenever the resolved audit path is NOT the Managed MCP Server.
  *
  * Warn when MCP was configured and we still ended up on direct SQL — that is a real fallback and
  * somebody should look at it. Info when no key was ever set, because on a clean checkout that is
  * the documented, expected path and warning about it would train the operator to ignore warnings.
+ *
+ * Called once per *resolution* rather than once per request, now that a resolution serves many
+ * requests. That is also the more accurate framing — falling back is something that happened once,
+ * at a known instant, and `ttlMs` says how long the decision stands before it is retried.
  */
 function noteAuditPath(reader: SqlReader): void {
   if (reader.via === 'mcp') return
@@ -125,7 +300,42 @@ function noteAuditPath(reader: SqlReader): void {
   emit(configured ? 'warn' : 'info', 'mcp.fallback', {
     configured,
     reason: reader.reason,
+    ttlMs: AUDIT_READER_TTL_MS,
   })
+}
+
+/**
+ * Strips cluster UUIDs out of a string bound for an unauthenticated response.
+ *
+ * `resolveMcpMode`'s reason sentence names the pinned cluster — "session pinned to cluster
+ * <uuid> via the mcp-cluster-id header" — and `/api/health` returned it verbatim, so the full
+ * CockroachDB Cloud cluster id was readable by anything that could GET a health endpoint. Low
+ * severity while the server is on loopback, but SLEEPER_BIND_HOST is a documented override and a
+ * health endpoint is precisely the route people point a monitor at.
+ *
+ * Redacting the identifier rather than rewriting the sentence keeps the operator-useful half — that
+ * the session IS pinned, and by which header — and keeps it useful if the sentence is ever reworded
+ * upstream; `clusterPinned` carries the same fact in machine-readable form. A pattern match, not a
+ * comparison against the configured id, so the id cannot escape through a *different* string (an
+ * MCP error message quoting it, say) that happens to reach the same response.
+ */
+function withoutClusterId(text: string): string {
+  return text.replace(
+    /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g,
+    '<redacted>',
+  )
+}
+
+/** `resolveMcpMode`, with the cluster id taken out — see `withoutClusterId`. */
+function publicMcpMode(): Record<string, unknown> {
+  const mode = resolveMcpMode()
+  if (mode.via === 'direct') return { via: mode.via, reason: withoutClusterId(mode.reason) }
+  return {
+    via: mode.via,
+    endpoint: mode.endpoint,
+    clusterPinned: mode.clusterPinned,
+    reason: withoutClusterId(mode.reason),
+  }
 }
 
 /**
@@ -158,8 +368,40 @@ async function handleState(res: ServerResponse): Promise<void> {
 
   try {
     const [events, arcs, playbook, holds, trust] = await Promise.all([
-      query<{ n: string }>('SELECT count(*) AS n FROM events'),
-      query<{ n: string }>('SELECT count(*) AS n FROM actor_arcs'),
+      /**
+       * Scoped to the configured package, and not only for the plan.
+       *
+       * `SELECT count(*) FROM events` is a FULL SCAN — EXPLAIN says
+       * `table: events@events_event_key_idx, spans: FULL SCAN` — and it was also answering the wrong
+       * question. Everything else on this panel is this package's (`latestHold`, `trustStatus`), the
+       * label above the number reads "events in memory", and on any cluster that has ever run a test
+       * or a second package the global count is larger than the memory the demo is about: 50 rows
+       * here for a package holding 25.
+       *
+       * With the predicate the planner takes a bounded prefix span off one of the two
+       * package-leading indexes (`events_pkg_actor_time_idx` here, `events_pkg_time_idx` equally
+       * eligible — either is a span, not a scan). Still a count, so it is O(rows in the package);
+       * this buys the right answer and the right span, not a constant-time counter.
+       */
+      query<{ n: string }>('SELECT count(*) AS n FROM events WHERE package_id = $1', [
+        config.packageId,
+      ]),
+      // Same argument, same shape: served by the `(package_id, actor_id)` unique index.
+      query<{ n: string }>('SELECT count(*) AS n FROM actor_arcs WHERE package_id = $1', [
+        config.packageId,
+      ]),
+      /**
+       * This one stays unfiltered, deliberately.
+       *
+       * The playbook is the CROSS-package corpus of known takeovers — the whole point is that it
+       * describes packages other than the one being assessed, so `WHERE package_id = $1` would
+       * return zero and the header would report an empty corpus for a demo that just matched against
+       * it. It is a FULL SCAN and will stay one: it is the seeded corpus, bounded at tens of rows
+       * (16 on this cluster), and the only predicate that could bound it further is `held_out`, which
+       * is the column being grouped BY. CockroachDB's own index recommendation here is an index on
+       * `held_out` — a two-value column over 16 rows, which is not a fix, it is a slower plan with
+       * more moving parts.
+       */
       query<{ n: string; held_out: boolean }>(
         'SELECT held_out, count(*) AS n FROM takeover_playbook GROUP BY held_out',
       ),
@@ -217,7 +459,11 @@ async function handleState(res: ServerResponse): Promise<void> {
  *
  * `mcp` reports the CONFIGURED resolution, not a live probe. Dialling the Managed MCP Server on
  * every health check would turn a monitor into a load generator against a third-party service; the
- * live answer is in `/api/state`, which resolves it for real once per page load.
+ * live answer is in `/api/state`, which resolves it for real (at most once per TTL window — see
+ * AUDIT_READER_TTL_MS).
+ *
+ * It reports it through `publicMcpMode` rather than verbatim: this route is unauthenticated and is
+ * the one an operator exposes on purpose, so the cluster identifier does not go in it.
  */
 async function handleHealth(res: ServerResponse): Promise<void> {
   const started = Date.now()
@@ -244,7 +490,7 @@ async function handleHealth(res: ServerResponse): Promise<void> {
     status: ok ? 'ok' : 'degraded',
     db: { reachable, latencyMs },
     inference: OFFLINE ? 'offline' : 'bedrock',
-    mcp: resolveMcpMode(),
+    mcp: publicMcpMode(),
     thresholds,
     version: VERSION,
   })
@@ -331,10 +577,8 @@ async function handleExplain(res: ServerResponse, corrId: string): Promise<void>
     json(res, 404, { error: 'no_actor_arc', message: 'No actor arc yet — run a replay first.' })
     return
   }
-  const reader = await auditReader()
-  noteAuditPath(reader)
-  const started = Date.now()
-  try {
+  await withAuditReader(async ({ reader, calls }) => {
+    const started = Date.now()
     const explain = await explainScopedVia(reader, config.packageId, arc.embedding)
     createLogger({ corrId, packageId: config.packageId }).info('retrieval.explained', {
       actorId,
@@ -347,17 +591,13 @@ async function handleExplain(res: ServerResponse, corrId: string): Promise<void>
       ...explain,
       // Named in the response because the arc being explained is now the agent's own choice.
       actorId,
-      audit: { via: reader.via, reason: reader.reason, calls: [...reader.calls] },
+      audit: { via: reader.via, reason: withoutClusterId(reader.reason), calls: calls() },
     })
-  } finally {
-    await reader.close()
-  }
+  })
 }
 
 async function handleHold(res: ServerResponse, holdId: string, corrId: string): Promise<void> {
-  const reader = await auditReader()
-  noteAuditPath(reader)
-  try {
+  await withAuditReader(async ({ reader, calls }) => {
     const evidence = await holdEvidence(holdId, reader)
     if (!evidence) {
       json(res, 404, { error: 'no_such_hold', message: `No release_hold with id ${holdId}` })
@@ -366,16 +606,14 @@ async function handleHold(res: ServerResponse, holdId: string, corrId: string): 
     createLogger({ corrId }).info('audit.read', {
       holdId,
       via: reader.via,
-      calls: reader.calls.length,
+      calls: calls().length,
       auditTrailRows: evidence.auditTrail.length,
     })
     json(res, 200, {
       ...evidence,
-      audit: { via: reader.via, reason: reader.reason, calls: [...reader.calls] },
+      audit: { via: reader.via, reason: withoutClusterId(reader.reason), calls: calls() },
     })
-  } finally {
-    await reader.close()
-  }
+  })
 }
 
 function serveStatic(res: ServerResponse, file: string, type: string): void {
@@ -564,6 +802,11 @@ server.listen(config.port, BIND_HOST, () => {
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
+    // The cached reader outlives a request now, so shutdown is the one place that has to let go of
+    // it. `retireAuditSession` closes it once its last lease is released, so an in-flight audit read
+    // finishes rather than losing its session on the way out; `server.close` is already waiting for
+    // that request anyway.
+    if (auditSession) retireAuditSession(auditSession)
     server.close(() => {
       void closePool().finally(() => process.exit(0))
     })

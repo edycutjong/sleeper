@@ -21,9 +21,49 @@ export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 export type LogFields = Record<string, unknown>
 export type LogLine = { ts: string; level: LogLevel; event: string } & LogFields
 
-/** Where lines go. Swapped by the test suite; there is no other reason to touch it. */
+/**
+ * Where lines go. Swapped by the test suite; there is no other reason to touch it.
+ *
+ * The try/catch is not defensive padding. `JSON.stringify` quietly drops a function, a Symbol or
+ * an `undefined` — but it THROWS on a circular reference and on a BigInt, and this sink is on the
+ * path `recordFailure` uses to report an error. Without the catch, logging a field that happens to
+ * hold a circular object takes the process down while it is in the middle of explaining why
+ * something else went wrong. That is the worst available failure mode: the diagnostic kills the
+ * thing it was diagnosing, and the original error is never written anywhere.
+ *
+ * So a line that cannot be serialised degrades to one that says so, naming the event and the
+ * offending keys, and the process survives. Losing one line's detail beats losing the process and
+ * the line.
+ */
 let sink: (line: LogLine) => void = (line) => {
-  process.stderr.write(`${JSON.stringify(line)}\n`)
+  let text: string
+  try {
+    text = JSON.stringify(line)
+  } catch (err) {
+    // Second attempt with a replacer that neutralises the two throwing cases. If even this fails,
+    // fall back to a hand-built line — never let a logging failure escape.
+    const seen = new WeakSet<object>()
+    try {
+      text = JSON.stringify(line, (_k, v) => {
+        if (typeof v === 'bigint') return `${v}n`
+        if (v && typeof v === 'object') {
+          if (seen.has(v)) return '[circular]'
+          seen.add(v)
+        }
+        return v
+      })
+    } catch {
+      const reason = err instanceof Error ? err.message : String(err)
+      text = JSON.stringify({
+        ts: line.ts,
+        level: line.level,
+        event: line.event,
+        logSerialisationFailed: reason,
+        droppedKeys: Object.keys(line).filter((k) => !['ts', 'level', 'event'].includes(k)),
+      })
+    }
+  }
+  process.stderr.write(`${text}\n`)
 }
 
 /** Returns the previous sink so a test can restore it. `SLEEPER_LOG=off` silences everything. */

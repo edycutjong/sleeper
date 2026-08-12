@@ -79,6 +79,21 @@ jobs:
         run: npm test
         env:
           DATABASE_URL: postgresql://root@localhost:26257/sleeper?sslmode=disable
+      - name: The documented test counts must be current
+        # tests/claims.test.ts asserts the README against tests/counts.json, so both can be stale
+        # together and the assertion still passes — which is exactly what happened once. This
+        # regenerates the file from the suite and fails if it moved, closing the loop:
+        # reality -> counts.json -> README, with no link able to drift unnoticed.
+        run: |
+          npm run counts
+          if ! git diff --quiet -- tests/counts.json; then
+            echo "::error file=tests/counts.json::stale — run \`npm run counts\` and commit, then update the README numbers"
+            git diff -- tests/counts.json
+            exit 1
+          fi
+        env:
+          DATABASE_URL: postgresql://root@localhost:26257/sleeper?sslmode=disable
+
 
   security:
     name: Dependency audit

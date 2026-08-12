@@ -25,7 +25,7 @@ so the memory layer *is* the product.**
 ![AWS Bedrock](https://img.shields.io/badge/AWS-Bedrock-FF9900?style=flat-square)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178C6?style=flat-square)
 ![Node](https://img.shields.io/badge/Node-%E2%89%A522-339933?style=flat-square)
-![Tests](https://img.shields.io/badge/tests-266_passing-22C55E?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-381_passing-22C55E?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 
 </div>
@@ -365,15 +365,15 @@ Full setup, reproduction steps and benchmark methodology: **[DEMO.md](DEMO.md)**
 
 ## 🧪 Testing & CI
 
-**266 tests.** On a fresh clone with no database and no AWS account, `npm test` prints
-`221 passed | 45 skipped (266)` — that is the honest output, and it is the one you should expect.
-The 45 need a reachable cluster; point `DATABASE_URL` at one and it becomes `266 passed`.
+**381 tests.** On a fresh clone with no database and no AWS account, `npm test` prints
+`333 passed | 48 skipped (381)` — that is the honest output, and it is the one you should expect.
+The 48 need a reachable cluster; point `DATABASE_URL` at one and it becomes `381 passed`.
 
 The gate is reachability, not configuration: a `DATABASE_URL` that is set but does not answer skips
 those 39 and prints why, naming the host and the driver's error. A stale credential should not look
 like broken code.
 
-The cluster-backed 45 assert the `prefix spans` plan line on both the neighbour query *and* the
+The cluster-backed 48 assert the `prefix spans` plan line on both the neighbour query *and* the
 query that actually makes the decision, held-out exclusion, all-or-nothing hold and unhold
 transactions, ingest idempotency under a retried delivery, and point-in-time correctness (a
 decision can never see an event from after its own assessment timestamp).

@@ -8,6 +8,16 @@
  * is here for: that `/api/replay` really is unreachable by GET, and that the process really does
  * bind loopback only.
  *
+ * The price, stated plainly because a coverage report will otherwise state it as an accusation: v8
+ * cannot instrument a child process, so `src/server.ts` measures 0% covered while every route in it
+ * is exercised here against a live cluster. That is a limitation of the measurement, not a gap in
+ * the tests, and it was NOT fixed by making the module importable — the two things that happen on
+ * import are a database-dependent boot check and `server.listen`, and gating either on a test-only
+ * flag would mean the judge-facing entry point boots one way for tests and another way for the demo,
+ * in exchange for a number. The shape that would earn the coverage honestly is the handlers living
+ * in their own module with this file reduced to a bootstrap; that is a change to src/, not to a
+ * test, and it belongs in a change that is about the architecture rather than about the metric.
+ *
  * Skipped without DATABASE_URL, like tests/integration.test.ts, so a clean checkout stays green.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -53,6 +63,19 @@ describe.skipIf(!LIVE)('demo server', () => {
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     await waitForHealth()
+    /**
+     * Health answering is not the same as ready, now that the audit path is resolved lazily and
+     * cached: the FIRST request to a route that needs it still dials cockroachlabs.cloud once, and
+     * whichever test happened to be first would pay ~1s of it inside a 5s budget — the same coin
+     * flip that made C9 flaky, just relocated. Warming it here puts that one cold call inside the
+     * 60s setup budget where it belongs, and leaves every test measuring the warm path, which is the
+     * path the fix is about. It cannot mask a regression: if the resolution went back to being per
+     * request, every call after this one would be slow again and the median assertion below fails.
+     */
+    await fetch(`${BASE}/api/state`).catch(() => {
+      // A cluster that cannot answer /api/state is what the degradation tests are for, not a setup
+      // failure — they assert the response, and this call exists only for its side effect.
+    })
   }, 60_000)
 
   afterAll(async () => {
@@ -121,6 +144,85 @@ describe.skipIf(!LIVE)('demo server', () => {
       expect(['mcp', 'direct']).toContain(b.mcp.via)
       expect(typeof b.mcp.reason).toBe('string')
     })
+
+    it('does not disclose the cluster id to an unauthenticated caller', async () => {
+      // `handleHealth` returned `resolveMcpMode()` verbatim, and its reason sentence names the
+      // pinned cluster — so the full CockroachDB Cloud cluster id was in the body of the one route
+      // an operator deliberately exposes to a monitor. Loopback by default keeps the severity low;
+      // SLEEPER_BIND_HOST is a documented override, which is why "low" is not "fine".
+      const res = await fetch(`${BASE}/api/health`)
+      const b = await readJson(res)
+      expect(JSON.stringify(b)).not.toMatch(
+        /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
+      )
+      // Redacted, not removed: an operator still learns the session is pinned, and by which header.
+      if (b.mcp.via === 'mcp') {
+        expect(typeof b.mcp.clusterPinned).toBe('boolean')
+        if (b.mcp.clusterPinned) expect(b.mcp.reason).toMatch(/mcp-cluster-id/)
+      }
+      // Same string reaches /api/state's header field, so it gets the same treatment.
+      const state = await readJson(await fetch(`${BASE}/api/state`))
+      expect(JSON.stringify(state.audit)).not.toMatch(
+        /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
+      )
+    })
+  })
+
+  /**
+   * The reason the raised timeout above could come back down to 5s.
+   *
+   * `/api/state` resolved the audit reader per request, and with COCKROACH_MCP_API_KEY set that
+   * resolution opens a Streamable HTTP session to cockroachlabs.cloud and reads `tools/list` before
+   * it can answer: measured 0.90–1.06s per call against `/api/health`'s 0.0015s. A page load's
+   * latency was a third-party round trip, and the suite had already started timing out on it.
+   *
+   * Asserted on the MEDIAN of several warm calls rather than on each one, deliberately. The thing
+   * being pinned down is a ~0.9s structural cost that every single call paid, which a median catches
+   * outright; a per-call bound would instead be a bet that a shared single-node cluster never has a
+   * slow moment, i.e. the flaky-timeout mistake this test exists because of. Cached, these measure
+   * ~0.002s, so the bound below has ~250x of headroom while still failing the defect by 2x.
+   */
+  describe('the audit path is resolved once per TTL window, not once per request', () => {
+    const WARM_CALLS = 5
+    const MEDIAN_BUDGET_MS = 500
+
+    it('serves repeated /api/state without paying for a third-party dial each time', async () => {
+      // One unmeasured call so the measurement is of the warm path. Whether the resolution happened
+      // here or in an earlier test does not matter — either way it is not in the samples below.
+      await fetch(`${BASE}/api/state`)
+
+      const samples: number[] = []
+      for (let i = 0; i < WARM_CALLS; i++) {
+        const started = performance.now()
+        const res = await fetch(`${BASE}/api/state`)
+        expect(res.status).toBe(200)
+        await res.json()
+        samples.push(performance.now() - started)
+      }
+
+      const median = [...samples].sort((a, b) => a - b)[Math.floor(WARM_CALLS / 2)]!
+      expect(median, `warm /api/state samples (ms): ${samples.map((s) => s.toFixed(1)).join(', ')}`)
+        .toBeLessThan(MEDIAN_BUDGET_MS)
+    })
+
+    it('still reports which path actually served the read', async () => {
+      // The cache must not be allowed to buy its speed by going vague. Two properties:
+      // `via`/`reason` are still there and populated, and — the one a stale cache would break —
+      // they cannot claim MCP when MCP was never configured in this process at all.
+      const health = await readJson(await fetch(`${BASE}/api/health`))
+      const first = await readJson(await fetch(`${BASE}/api/state`))
+      const second = await readJson(await fetch(`${BASE}/api/state`))
+
+      for (const b of [first, second]) {
+        expect(['mcp', 'direct']).toContain(b.audit.via)
+        expect(b.audit.reason.length).toBeGreaterThan(0)
+      }
+      // Two reads inside one TTL window must not disagree about the path in force.
+      expect(second.audit.via).toBe(first.audit.via)
+      // Configured direct ⇒ resolved direct. (The converse does not hold: MCP can be configured and
+      // still fall back, which is exactly what `audit.reason` is for.)
+      if (health.mcp.via === 'direct') expect(first.audit.via).toBe('direct')
+    })
   })
 
   describe('C2 / C3 — /api/state degrades instead of throwing, and leaks nothing', () => {
@@ -167,13 +269,13 @@ describe.skipIf(!LIVE)('demo server', () => {
   })
 
   describe('C9 — the browser demo exercises the resolved audit reader', () => {
-    // 20s, not vitest's 5s default. When COCKROACH_MCP_API_KEY is set this route resolves the
-    // audit reader by actually dialling cockroachlabs.cloud — ~0.85s idle, but well past 5s when
-    // the suite is competing with itself for the same cluster. It failed intermittently in roughly
-    // one run of six and passed in 1.6s when run alone, which is the signature of a timeout that is
-    // too tight rather than a race. The real fix is to stop dialling a third party inside a request
-    // (the resolution should be cached); until then, the timeout should not be the thing that lies.
-    it('names the path that served the explain read', { timeout: 20_000 }, async () => {
+    // Back on vitest's 5s default. This carried `{ timeout: 20_000 }` because the route resolved the
+    // audit reader per request, which with COCKROACH_MCP_API_KEY set meant dialling
+    // cockroachlabs.cloud inside the request — ~0.85s of it idle, and past 5s under suite load. The
+    // resolution is cached now (AUDIT_READER_TTL_MS in src/server.ts), so what is left inside the
+    // request is the `explain_query` tool call itself, measured at ~0.7s: that one is the feature,
+    // not overhead, and it cannot be cached without the evidence ceasing to come from the cluster.
+    it('names the path that served the explain read', async () => {
       const res = await fetch(`${BASE}/api/explain`)
       // 404 before a replay has ever run, which is a legitimate state on a fresh cluster.
       if (res.status === 404) {
@@ -357,5 +459,9 @@ describe.skipIf(!LIVE)('decision logging covers allow as well as hold (C4)', () 
     // Every line is correlated, which is what makes the trail greppable.
     expect(lines.every((l) => l.corrId === 'testcorr')).toBe(true)
     expect(lines.find((l) => l.event === 'retrieval.explained')).toHaveProperty('prefixScoped')
+    // 30s stays, and it is not the audit-reader problem in disguise: this suite is gated on LIVE
+    // alone, so with SLEEPER_OFFLINE unset `runReplay` makes real Bedrock embed and Converse calls
+    // and 5s is not a budget it can meet. Offline — how CI and the Makefile run it — it finishes in
+    // well under 300ms, so the allowance costs nothing when it is not needed.
   }, 30_000)
 })

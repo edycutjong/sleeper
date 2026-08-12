@@ -11,77 +11,80 @@
  *             quoted a skip count that was also wrong
  *   round 3   "14 tests cover the fencing"; there were 6
  *
- * Correcting them by hand three times did not stop it happening a fourth, because the failure is
- * structural: prose asserts a fact about code, and nothing recomputes the fact. So the counts are
- * asserted here instead. If you add a test, this fails until the README agrees — which is the point.
+ * Correcting them by hand three times did not stop a fourth, because the failure is structural:
+ * prose asserts a fact about code and nothing recomputes the fact.
+ *
+ * THE FIRST VERSION OF THIS FILE GOT IT WRONG TOO, and how is worth recording. It counted `it(`
+ * occurrences with a regex, which under-counts tests generated in a loop — one `it(` producing four
+ * cases — and over-counts anything that merely looks like a call. It reported 377 against a real 380
+ * and failed for a reason that had nothing to do with the README. A checker that is itself
+ * unreliable is worse than no checker, because it trains you to ignore it.
+ *
+ * So the count now comes from vitest, the only component that knows: `npm run counts` writes
+ * `tests/counts.json`, this asserts the README against that, and CI regenerates it and fails if the
+ * file is dirty. Reality -> counts.json -> README, with every link enforced.
  *
  * Deliberately NOT asserted: prose claims about behaviour ("the gate refuses to hold…"). Those
  * belong in the suites that exercise the behaviour, and a regex over English would give false
  * confidence about exactly the class of claim that most needs a real test.
  */
-import { readFileSync, readdirSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 const ROOT = join(import.meta.dirname, '..')
 const readme = readFileSync(join(ROOT, 'README.md'), 'utf8')
 
-/**
- * Counts `it(` occurrences across the suite by reading the files.
- *
- * Not vitest's own reporter, on purpose: importing the suites to count them would execute them, and
- * a count that depends on a cluster being reachable is the very fragility this file exists to
- * remove. A static count is stable whether or not DATABASE_URL points anywhere.
- */
-function countTests(): { total: number; perFile: Record<string, number> } {
-  const perFile: Record<string, number> = {}
-  let total = 0
-  for (const file of readdirSync(join(ROOT, 'tests')).filter((f) => f.endsWith('.test.ts'))) {
-    const src = readFileSync(join(ROOT, 'tests', file), 'utf8')
-    // `it(` and `it.each(`/`it.skipIf(` etc., but not `it` inside a word like "commit(".
-    const n = (src.match(/(?<![\w.])it(\.\w+)?\s*\(/g) ?? []).length
-    perFile[file] = n
-    total += n
-  }
-  return { total, perFile }
-}
+type Counts = { total: number; cleanClone: { passed: number; skipped: number } }
+const counts: Counts = JSON.parse(readFileSync(join(ROOT, 'tests', 'counts.json'), 'utf8'))
 
 describe('README numbers match the code they describe', () => {
+  it('has a counts file that is internally coherent', () => {
+    // If this fails, `npm run counts` is broken and every assertion below is measuring nothing.
+    expect(counts.total).toBeGreaterThan(0)
+    expect(counts.cleanClone.passed + counts.cleanClone.skipped).toBe(counts.total)
+  })
+
   it('the test-count badge matches the real total', () => {
-    const { total } = countTests()
     const badge = readme.match(/badge\/tests-(\d+)_passing/)
     expect(badge, 'the tests badge is missing from README.md').not.toBeNull()
-    expect(Number(badge![1]), `badge says ${badge![1]}, suite has ${total}`).toBe(total)
+    expect(
+      Number(badge![1]),
+      `badge says ${badge![1]}, suite has ${counts.total} — run \`npm run counts\``,
+    ).toBe(counts.total)
   })
 
   it('the prose total matches the real total', () => {
-    const { total } = countTests()
     const prose = readme.match(/\*\*(\d+) tests\.?\*\*/)
     expect(prose, 'README.md no longer states a bolded test total').not.toBeNull()
-    expect(Number(prose![1]), `prose says ${prose![1]}, suite has ${total}`).toBe(total)
+    expect(Number(prose![1]), `prose says ${prose![1]}, suite has ${counts.total}`).toBe(counts.total)
+  })
+
+  it('the documented clean-clone output is the one a fresh clone actually prints', () => {
+    // The line a judge pastes into a terminal first. It has been wrong twice.
+    const m = readme.match(/`(\d+) passed \| (\d+) skipped \((\d+)\)`/)
+    expect(m, 'README.md no longer documents the no-cluster output').not.toBeNull()
+    const [passed, skipped, stated] = [Number(m![1]), Number(m![2]), Number(m![3])]
+    expect(passed, 'clean-clone passed count').toBe(counts.cleanClone.passed)
+    expect(skipped, 'clean-clone skipped count').toBe(counts.cleanClone.skipped)
+    expect(passed + skipped, `${passed} + ${skipped} != ${stated}`).toBe(stated)
+    expect(stated).toBe(counts.total)
   })
 
   it('the fencing-test count matches the prompt-injection block', () => {
-    // The claim this pins is "N tests cover the fencing (tests/agent.test.ts)". Round 3 found it
-    // saying 14 against a real 6 — an overclaim sitting 300 lines above the falsifiability dare.
+    // Scoped to one describe block, so a regex is adequate here in a way it was not for the total:
+    // this block contains no generated tests, and if that ever changes this assertion is the thing
+    // that notices.
     const src = readFileSync(join(ROOT, 'tests', 'agent.test.ts'), 'utf8')
-    const block = src.slice(src.indexOf("describe('prompt injection hardening"))
-    const end = block.indexOf('\n})')
-    const fencing = (block.slice(0, end).match(/(?<![\w.])it(\.\w+)?\s*\(/g) ?? []).length
-    expect(fencing, 'could not find the prompt-injection describe block').toBeGreaterThan(0)
+    const from = src.indexOf("describe('prompt injection hardening")
+    expect(from, 'the prompt-injection describe block has been renamed or removed').toBeGreaterThan(-1)
+    const block = src.slice(from, from + src.slice(from).indexOf('\n})'))
+    expect(/\bfor\s*\(/.test(block), 'a loop appeared in the fencing block — this count is now unreliable').toBe(false)
+    const fencing = (block.match(/(?<![\w.])it(\.\w+)?\s*\(/g) ?? []).length
+    expect(fencing).toBeGreaterThan(0)
 
     const claim = readme.match(/(\d+) tests? cover the fencing/)
     expect(claim, 'README.md no longer states a fencing test count').not.toBeNull()
     expect(Number(claim![1]), `README says ${claim![1]}, block has ${fencing}`).toBe(fencing)
-  })
-
-  it('the documented clean-clone output has internally consistent arithmetic', () => {
-    // "`217 passed | 41 skipped (258)`" — the numbers must add up even if nobody re-runs it. A
-    // judge on a fresh clone pastes this line into a terminal first; it has been wrong twice.
-    const m = readme.match(/`(\d+) passed \| (\d+) skipped \((\d+)\)`/)
-    expect(m, 'README.md no longer documents the no-cluster output').not.toBeNull()
-    const [, passed, skipped, stated] = m!.map(Number) as unknown as [unknown, number, number, number]
-    expect(passed + skipped, `${passed} + ${skipped} != ${stated}`).toBe(stated)
-    expect(stated).toBe(countTests().total)
   })
 })
