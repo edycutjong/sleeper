@@ -99,7 +99,14 @@ jobs:
         # Cheap backstop, not a replacement for scanning: this repo's whole threat model is about
         # credentials, and .env is gitignored precisely so this never has anything to find.
         run: |
-          if git ls-files | grep -qE '^\.env$'; then
-            echo "::error::.env is tracked — it must never be committed"
+          # Any .env variant except the template. The previous version matched exactly '.env',
+          # which is narrower than the thing it is protecting against: a `.env.backup-1786486102`
+          # holding live cluster credentials sat in the working tree for hours, covered by
+          # .gitignore's `.env.*` but invisible to this check. A backstop that only catches the
+          # filename you already thought of is not a backstop.
+          leaked=$(git ls-files | grep -E '^\.env' | grep -v '^\.env\.example$' || true)
+          if [ -n "$leaked" ]; then
+            echo "::error::credential-shaped file(s) are tracked and must never be committed:"
+            printf '  %s\n' $leaked
             exit 1
           fi

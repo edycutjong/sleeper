@@ -4,7 +4,9 @@
 
 # Sleeper
 
-### The release gate that remembers.
+<p><em>The release gate that remembers.</em></p>
+
+<img src="site/assets/readme-hero.png" alt="Sleeper — the release gate that remembers" width="820" />
 
 A release-gate agent whose multi-year memory of every commit, email and maintainer change
 recognises a slow-motion supply-chain takeover — the xz backdoor pattern — that no single code
@@ -13,11 +15,9 @@ review can see, and atomically **holds** the poisoned release before it ships.
 **A 90-day slice of the xz attack is three innocuous commits. The signal only exists across years —
 so the memory layer *is* the product.**
 
-<img src="site/assets/readme-hero.png" alt="Sleeper" width="820" />
-
 <br />
 
-[**Demo**](#-quick-start) · [**How it works**](#-how-it-works) · [**Reproduce the numbers**](DEMO.md) · [**Architecture**](#-architecture)
+[**Demo**](#-getting-started) · [**Architecture**](#%EF%B8%8F-architecture--tech-stack) · [**Reproduce the numbers**](DEMO.md)
 
 <br />
 
@@ -32,7 +32,9 @@ so the memory layer *is* the product.**
 
 ---
 
-## 🕯️ The problem
+## 💡 The Problem & Solution
+
+### The Problem
 
 On 2024-03-29 a backdoor was found in **xz-utils**, a compression library
 ([CVE-2024-3094](https://nvd.nist.gov/vuln/detail/CVE-2024-3094), CVSS 10.0 — the score is in
@@ -74,7 +76,7 @@ one engineer chasing a latency anomaly, which is not a control anyone can schedu
 number appears in this repo: every figure here carries a source, and that one has none we are
 willing to stand behind.
 
-## 🌒 What Sleeper does
+### The Solution
 
 Sleeper watches a package the way no human reviewer can: continuously, for years, remembering
 everything. When a release is about to go out, it rolls the actor's entire trajectory into one
@@ -133,7 +135,7 @@ output is never executed**: it is summarised, embedded, and compared against a f
 an injected summary still has to land near a known takeover arc in vector space to change a verdict.
 6 tests cover the fencing (`tests/agent.test.ts`).
 
-## 🧠 How it works
+## 🏗️ Architecture & Tech Stack
 
 The premise is that **the memory layer is the product**. A 90-day slice of this attack is three
 innocuous commits; the signal only exists across years of accumulated context. So the decision is
@@ -240,47 +242,9 @@ invariant is tested by killing a transaction mid-write and asserting nothing sur
 | **Bedrock — Claude** (`Converse`) | Rolls a multi-year event history into one behavioural arc summary, then composes the hold rationale and the distro advisory. |
 | **Lambda** | Hosts the agent loop (`src/handler.ts`), webhook-triggered: one event arrives, is embedded, written, and assessed against everything already in memory. |
 
-## 🚀 Quick start
+## 📊 Engineering Rigor
 
-```bash
-npm install
-cp .env.example .env          # DATABASE_URL + Bedrock model ids
-
-npm run schema                # tables + vector indexes
-npm run seed                  # playbook and held-out arc corpora
-npm run calibrate             # fit thresholds on the playbook split only
-npm start                     # http://localhost:3000 -> press "Replay the xz timeline"
-```
-
-Terminal equivalents: `npm run replay`, then `npm run explain -- --hold <uuid>`.
-
-No AWS account? `SLEEPER_OFFLINE=1` swaps Bedrock for a deterministic stand-in so the schema, the
-SQL, the vector indexes and the transaction semantics all run against a local CockroachDB node.
-It proves the wiring and detects nothing — see [DEMO.md §4](DEMO.md#4-running-without-aws-credentials).
-
-Full setup, reproduction steps and benchmark methodology: **[DEMO.md](DEMO.md)**.
-
-## 🧪 Tests
-
-**266 tests.** On a fresh clone with no database and no AWS account, `npm test` prints
-`221 passed | 45 skipped (266)` — that is the honest output, and it is the one you should expect.
-The 45 need a reachable cluster; point `DATABASE_URL` at one and it becomes `266 passed`.
-
-The gate is reachability, not configuration: a `DATABASE_URL` that is set but does not answer skips
-those 39 and prints why, naming the host and the driver's error. A stale credential should not look
-like broken code.
-
-The cluster-backed 45 assert the `prefix spans` plan line on both the neighbour query *and* the
-query that actually makes the decision, held-out exclusion, all-or-nothing hold and unhold
-transactions, ingest idempotency under a retried delivery, and point-in-time correctness (a
-decision can never see an event from after its own assessment timestamp).
-
-That cluster does not have to be a Cloud cluster. `cockroach start-single-node --insecure` runs the
-whole suite, vector indexes included, with no AWS account and no CockroachDB Cloud subscription —
-see [DEMO.md](DEMO.md). It reproduces the mechanism and the query plans; it cannot reproduce the
-accuracy figures, which need real embeddings.
-
-## 📊 Benchmark
+### Benchmark
 
 `npm run bench` reports recall@k, hold recall, false-positive rate and p50/p95 latency — measured
 **only** on held-out arcs, against a lexical baseline, with the xz timeline excluded from every
@@ -297,7 +261,7 @@ it. The measured p50/p95, the corpus size it was measured over, and a real `EXPL
 the deciding query's `prefix spans` are in [DEMO.md](DEMO.md#results) — with the caveat that 8
 searchable arcs is a floor, not a scale result.
 
-## 🛡️ Production readiness
+### Production readiness
 
 - **Access control** — `scripts/provision.sh` creates two SQL identities, split setup-versus-runtime, plus an optional read-only Cloud service account (`--mcp-key`) on a different auth plane:
   `sleeper_admin` (DDL, one cluster setting, and the destructive setup paths), `gate_svc` (the
@@ -354,6 +318,46 @@ searchable arcs is a floor, not a scale result.
 - **Honest thresholds** — fitted by leave-one-out on the playbook split, never on the evaluation
   set, and the fitted file is gitignored so a threshold from someone else's model cannot silently
   move the gate.
+
+## 🚀 Getting Started
+
+```bash
+npm install
+cp .env.example .env          # DATABASE_URL + Bedrock model ids
+
+npm run schema                # tables + vector indexes
+npm run seed                  # playbook and held-out arc corpora
+npm run calibrate             # fit thresholds on the playbook split only
+npm start                     # http://localhost:3000 -> press "Replay the xz timeline"
+```
+
+Terminal equivalents: `npm run replay`, then `npm run explain -- --hold <uuid>`.
+
+No AWS account? `SLEEPER_OFFLINE=1` swaps Bedrock for a deterministic stand-in so the schema, the
+SQL, the vector indexes and the transaction semantics all run against a local CockroachDB node.
+It proves the wiring and detects nothing — see [DEMO.md §4](DEMO.md#4-running-without-aws-credentials).
+
+Full setup, reproduction steps and benchmark methodology: **[DEMO.md](DEMO.md)**.
+
+## 🧪 Testing & CI
+
+**266 tests.** On a fresh clone with no database and no AWS account, `npm test` prints
+`221 passed | 45 skipped (266)` — that is the honest output, and it is the one you should expect.
+The 45 need a reachable cluster; point `DATABASE_URL` at one and it becomes `266 passed`.
+
+The gate is reachability, not configuration: a `DATABASE_URL` that is set but does not answer skips
+those 39 and prints why, naming the host and the driver's error. A stale credential should not look
+like broken code.
+
+The cluster-backed 45 assert the `prefix spans` plan line on both the neighbour query *and* the
+query that actually makes the decision, held-out exclusion, all-or-nothing hold and unhold
+transactions, ingest idempotency under a retried delivery, and point-in-time correctness (a
+decision can never see an event from after its own assessment timestamp).
+
+That cluster does not have to be a Cloud cluster. `cockroach start-single-node --insecure` runs the
+whole suite, vector indexes included, with no AWS account and no CockroachDB Cloud subscription —
+see [DEMO.md](DEMO.md). It reproduces the mechanism and the query plans; it cannot reproduce the
+accuracy figures, which need real embeddings.
 
 ## ⚠️ If Sleeper is wrong
 

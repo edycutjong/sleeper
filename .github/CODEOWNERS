@@ -1,0 +1,12 @@
+# Everything, by default. This is a hackathon project with one author; the file exists so that
+# review routing is explicit rather than implied, and so a second contributor inherits it.
+*                       @edycu
+
+# The decision path. Changing what the gate decides is not a refactor: src/decide.ts holds the
+# two-sided rule and the abstain, sql/schema.sql holds the index prefixes those depend on, and
+# data/synthetic-arcs.json is the corpus the thresholds are fitted against. A change here can
+# alter a verdict without failing a test.
+/src/decide.ts          @edycu
+/src/signals.ts         @edycu
+/sql/schema.sql         @edycu
+/data/                  @edycu
