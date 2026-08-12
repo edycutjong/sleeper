@@ -143,21 +143,45 @@ not made on the incoming event — it is made on what the incoming event means g
 already in the database.
 
 ```mermaid
+%%{init: {"flowchart": {"curve": "basis", "padding": 12}}}%%
 flowchart TD
     A["GitHub-webhook-shaped event<br/>(replayed xz timeline)"] --> B["AWS Lambda / demo server<br/>agent loop"]
     B --> C["Bedrock InvokeModel<br/>Titan Text Embeddings V2"]
-    C --> D[("events<br/>VECTOR INDEX (package_id, embedding)")]
-    D -->|"read history back OUT of the cluster"| E["Bedrock Converse (Claude)<br/>roll up the behavioural arc"]
+    C --> D[("events<br/>VECTOR INDEX<br/>(package_id, embedding)")]
+    D -->|"read history back OUT of the cluster,<br/>bounded to what was knowable then"| E["Bedrock Converse (Claude)<br/>roll up the behavioural arc"]
     E --> F["Bedrock InvokeModel<br/>embed the arc"]
-    F --> G[("actor_arcs<br/>VECTOR INDEX (package_id, embedding)")]
-    G -->|"prefix-scoped<br/>WHERE package_id = $1 ORDER BY embedding <=> $2"| H{{"EXPLAIN proves<br/>prefix spans"}}
-    G -->|"unscoped ORDER BY embedding <=> $1"| I[("takeover_playbook<br/>held_out excluded")]
-    I --> J{"similarity ≥ threshold<br/>AND separated from benign?"}
-    J -- no --> K["Release allowed, event archived"]
-    J -- yes --> L["Bedrock Converse (Claude)<br/>compose rationale + advisory"]
+    F --> G[("actor_arcs<br/>the arc is stored here")]
+    F -->|"prefix-scoped over this package's own events<br/>WHERE package_id = $1 ORDER BY embedding <=> $2"| H{{"EXPLAIN proves<br/>prefix spans"}}
+    F -->|"prefix-scoped on (held_out, embedding_model)<br/>ORDER BY embedding <=> $1"| I[("takeover_playbook<br/>held-out arcs excluded<br/>by the index, not a filter")]
+    I --> J{"similarity ≥ threshold<br/>AND separated from<br/>the nearest benign arc?"}
+    J -->|"no, or nothing to<br/>contrast against"| K["Release allowed<br/>decision recorded either way"]
+    J -->|"yes"| L["Bedrock Converse (Claude)<br/>compose rationale + advisory"]
     L --> M["ONE ACID TRANSACTION<br/>INSERT release_hold +<br/>UPDATE trust_state +<br/>INSERT distro_advisory_outbox +<br/>INSERT audit_log"]
-    M --> N["Managed MCP Server<br/>select_query / explain_query / get_table_schema"]
+    M --> N["Managed MCP Server<br/>select_query · explain_query<br/>get_table_schema · show_statement"]
     N --> O["Distro packager:<br/>'explain your hold'"]
+
+    %% Palette note: pale fills with explicitly dark text, so the diagram is legible in BOTH
+    %% GitHub themes. Mermaid's own theme variables flip with the page; hardcoded colours do not,
+    %% and a saturated fill that reads well on white turns unreadable on GitHub's dark background.
+    %% Colour carries meaning here rather than decoration: orange is AWS inference, purple is
+    %% CockroachDB memory, amber is the gate, red is the irreversible act, green is the pass.
+    classDef input fill:#E8EAED,stroke:#5F6368,stroke-width:1px,color:#202124
+    classDef aws fill:#FFE8CC,stroke:#FF9900,stroke-width:2px,color:#7A3E00
+    classDef crdb fill:#EDE4FF,stroke:#6933FF,stroke-width:2px,color:#3A1D80
+    classDef proof fill:#D9F2E6,stroke:#0F9D58,stroke-width:2px,color:#0B5D36
+    classDef gate fill:#FFF4CC,stroke:#F9AB00,stroke-width:2px,color:#7A5C00
+    classDef allow fill:#D9F2E6,stroke:#0F9D58,stroke-width:2px,color:#0B5D36
+    classDef act fill:#FFD9D9,stroke:#D93025,stroke-width:3px,color:#8C1D16
+    classDef audit fill:#D6ECFB,stroke:#1A73E8,stroke-width:2px,color:#0B4A91
+
+    class A,B input
+    class C,E,F,L aws
+    class D,G,I crdb
+    class H proof
+    class J gate
+    class K allow
+    class M act
+    class N,O audit
 ```
 
 Four details that matter:
@@ -323,12 +347,12 @@ searchable arcs is a floor, not a scale result.
 
 ```bash
 npm install
-cp .env.example .env          # DATABASE_URL + Bedrock model ids
+cp .env.example .env   # DATABASE_URL + Bedrock model ids
 
-npm run schema                # tables + vector indexes
-npm run seed                  # playbook and held-out arc corpora
-npm run calibrate             # fit thresholds on the playbook split only
-npm start                     # http://localhost:3000 -> press "Replay the xz timeline"
+npm run schema         # tables + vector indexes
+npm run seed           # playbook and held-out arc corpora
+npm run calibrate      # fit thresholds on the playbook split only
+npm start              # http://localhost:3000 -> press "Replay the xz timeline"
 ```
 
 Terminal equivalents: `npm run replay`, then `npm run explain -- --hold <uuid>`.
