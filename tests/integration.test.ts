@@ -18,7 +18,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { offlineEmbed } from '../src/embeddings.js'
 import { closePool, query, withTransaction } from '../src/db.js'
 import {
+  ACTOR_HISTORY_SQL,
+  HISTORY_LIMIT,
   OFFLINE_EMBEDDING_MODEL,
+  PACKAGE_HISTORY_SQL,
   actorHistory,
   arcWindow,
   clearPlaybook,
@@ -48,6 +51,8 @@ const OTHER_PKG = `test-other-${process.pid}`
 // Two more, owned by the trust-state invariant test at the bottom of the file.
 const ONLY_CITING = `${PKG}-clear-only-citing`
 const ALSO_UNCITED = `${PKG}-clear-also-uncited`
+// Owned by the test that proves the INVERSE invariant check is not vacuous.
+const UNMARKED_HELD = `${PKG}-open-hold-unmarked`
 const ACTOR = 'test-actor'
 const ASOF = new Date('2024-02-24T00:00:00Z')
 
@@ -86,7 +91,14 @@ type HoldRow = {
 }
 type AdvisoryRow = { id: string; release_hold_id: string; advisory_text: string; sent: boolean; created_at: Date }
 type AuditRow = { id: string; release_hold_id: string; actor: string; action: string; detail: string | null; created_at: Date }
-type ForeignRows = { arcs: ArcRow[]; holds: HoldRow[]; advisories: AdvisoryRow[]; audit: AuditRow[] }
+type TrustRow = { package_id: string; status: string; updated_at: Date }
+type ForeignRows = {
+  arcs: ArcRow[]
+  holds: HoldRow[]
+  advisories: AdvisoryRow[]
+  audit: AuditRow[]
+  trust: TrustRow[]
+}
 
 /**
  * Everything in the cluster that this suite does NOT own, captured so a forced `clearPlaybook` can
@@ -118,7 +130,17 @@ async function snapshotForeignRows(ownArcIds: string[], ownPackages: string[]): 
   const audit = holdIds.length
     ? (await query<AuditRow>('SELECT * FROM audit_log WHERE release_hold_id = ANY($1)', [holdIds])).rows
     : []
-  return { arcs: arcs.rows, holds: holds.rows, advisories, audit }
+  // `trust_state` is part of the snapshot because the forced clear rewrites it: it sets every
+  // package whose last citing hold is about to vanish back to 'trusted'. Restoring the holds
+  // without restoring the claim they justify leaves the mirror image of the state this suite
+  // exists to forbid — an open hold on a package the UI reports as trusted, i.e. a hold nobody is
+  // enforcing. That is not hypothetical: it is how the demo cluster's `xz-utils-notice-preview`
+  // lane ended up trusted while still holding an open hold.
+  const trust = await query<TrustRow>(
+    'SELECT package_id, status, updated_at FROM trust_state WHERE NOT (package_id = ANY($1))',
+    [ownPackages],
+  )
+  return { arcs: arcs.rows, holds: holds.rows, advisories, audit, trust: trust.rows }
 }
 
 /**
@@ -168,6 +190,16 @@ async function restoreForeignRows(rows: ForeignRows): Promise<void> {
       [l.id, l.release_hold_id, l.actor, l.action, l.detail, l.created_at],
     )
   }
+  // Trust status goes back LAST, once the evidence it points at is in place, and it is the one
+  // restore that must OVERWRITE: the clear updated these rows rather than deleting them, so DO
+  // NOTHING would silently leave the rewritten status behind on every foreign package.
+  for (const t of rows.trust) {
+    await query(
+      `INSERT INTO trust_state (package_id, status, updated_at) VALUES ($1, $2, $3)
+       ON CONFLICT (package_id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at`,
+      [t.package_id, t.status, t.updated_at],
+    )
+  }
 }
 
 /**
@@ -188,6 +220,39 @@ async function orphanedHeldPackages(): Promise<string[]> {
       ORDER BY t.package_id`,
   )
   return result.rows.map((r) => r.package_id)
+}
+
+/**
+ * The same invariant read from the other end: every package carrying an OPEN hold that
+ * `trust_state` does not report as held.
+ *
+ * The check above catches a claim with no evidence. This one catches evidence with no claim, and it
+ * is arguably the worse of the two: an orphaned 'held' status blocks a release that should ship and
+ * is loudly wrong the moment anyone asks it for the hold, while an unmarked open hold is silently
+ * wrong — `/api/state` says trusted, the operator sees nothing to review, and a hold sits open with
+ * nobody enforcing it and an advisory already queued to the distros. `trust_state` has no foreign
+ * key to `release_hold` and cannot get one (the relation is "any open hold", not "this row"), so
+ * both directions have to be asserted, not assumed.
+ *
+ * A missing `trust_state` row counts as a violation, not as an exemption: the demo server reads the
+ * status from this table and treats an absent row as trusted.
+ */
+async function heldPackagesNotMarked(): Promise<string[]> {
+  const result = await query<{ package_id: string }>(
+    `SELECT DISTINCT h.package_id FROM release_hold h
+      WHERE h.resolution IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM trust_state t WHERE t.package_id = h.package_id AND t.status = 'held'
+        )
+      ORDER BY h.package_id`,
+  )
+  return result.rows.map((r) => r.package_id)
+}
+
+/** EXPLAIN output for a parameterised statement, joined into one string to match against. */
+async function explainPlan(sql: string, params: unknown[]): Promise<string> {
+  const result = await query<{ info: string }>(`EXPLAIN ${sql}`, params)
+  return result.rows.map((r) => r.info).join('\n')
 }
 
 describe.skipIf(!LIVE)('CockroachDB memory layer', () => {
@@ -227,8 +292,9 @@ describe.skipIf(!LIVE)('CockroachDB memory layer', () => {
     await resetPackage(OTHER_PKG)
     await resetPackage(ONLY_CITING)
     await resetPackage(ALSO_UNCITED)
+    await resetPackage(UNMARKED_HELD)
     await query('DELETE FROM trust_state WHERE package_id = ANY($1)', [
-      [PKG, OTHER_PKG, ONLY_CITING, ALSO_UNCITED],
+      [PKG, OTHER_PKG, ONLY_CITING, ALSO_UNCITED, UNMARKED_HELD],
     ])
     if (playbookIds.length) {
       await query('DELETE FROM takeover_playbook WHERE id = ANY($1)', [playbookIds])
@@ -453,6 +519,34 @@ describe.skipIf(!LIVE)('CockroachDB memory layer', () => {
     // held_out=false is the leading prefix column; the model id is the second.
     expect(explain.plan).toMatch(/prefix spans: \[\/false/i)
     expect(explain.plan).toContain(OFFLINE_EMBEDDING_MODEL)
+  })
+
+  /**
+   * The two tests above are about the retrieval. This one is about the reads that feed it.
+   *
+   * `actorHistory` and `packageHistory` run on every assessment, and sql/schema.sql calls them the
+   * one access pattern this project cannot afford to be slow at. Having an index they can scan is
+   * not the same as being served by it: with only the key columns indexed, CockroachDB found the
+   * rows in `events_pkg_*_time_idx` and then ran an `index join` back into `events@events_pkey` to
+   * fetch kind, content and source_url — up to SLEEPER_HISTORY_LIMIT (5,000) primary-key lookups
+   * per assessment, for rows it had already located. The STORING lists make both reads covering.
+   *
+   * Asserted as the ABSENCE of `index join`, because that is the failure: any future column added
+   * to either SELECT list without being added to the STORING list brings the lookup straight back,
+   * and nothing else in the suite would notice. The positive assertion on the index name is what
+   * keeps the negative one honest — a plan that stopped using these indexes altogether would
+   * otherwise pass by having no join to find.
+   */
+  it('serves both history reads from a covering index, with no lookup back into the table', async () => {
+    const actorPlan = await explainPlan(ACTOR_HISTORY_SQL, [PKG, ACTOR, ASOF.toISOString(), HISTORY_LIMIT])
+    expect(actorPlan).toContain('events@events_pkg_actor_time_idx')
+    expect(actorPlan).not.toMatch(/index join/i)
+    expect(actorPlan).not.toContain('events@events_pkey')
+
+    const packagePlan = await explainPlan(PACKAGE_HISTORY_SQL, [PKG, ASOF.toISOString(), HISTORY_LIMIT])
+    expect(packagePlan).toContain('events@events_pkg_time_idx')
+    expect(packagePlan).not.toMatch(/index join/i)
+    expect(packagePlan).not.toContain('events@events_pkey')
   })
 
   it('returns similarities in [-1, 1] and in descending order', async () => {
@@ -815,6 +909,11 @@ describe.skipIf(!LIVE)('CockroachDB memory layer', () => {
    * Asserted as an invariant over the whole cluster rather than as an equality on one package,
    * because the failure is not "this package has the wrong status" — it is "some package somewhere
    * is lying about being held", and the next one to do it will not be xz-utils.
+   *
+   * BOTH directions are asserted. "If and only if" was only ever checked left-to-right, and the
+   * missing half showed up on the demo cluster in exactly the way an untested invariant does: an
+   * open hold on a package reading 'trusted'. See `heldPackagesNotMarked` for why that one is the
+   * quieter and more dangerous of the two.
    */
   it('never leaves a package held with no open hold — after a clear, or at all', async () => {
     // Two packages, because the interesting half is what must NOT change. `commitUnhold` already
@@ -890,10 +989,70 @@ describe.skipIf(!LIVE)('CockroachDB memory layer', () => {
       expect(await statusOf(ALSO_UNCITED)).toBe('held')
 
       expect(await orphanedHeldPackages()).toEqual([])
+      // ALSO_UNCITED is the live proof for this direction rather than a hypothetical: it is holding
+      // an open hold the clear did not touch, so if the clear had reset its status — or reset one
+      // package too many — this is what would catch it.
+      expect(await heldPackagesNotMarked()).toEqual([])
     } finally {
       await restoreForeignRows(foreign)
       await resetPackage(ONLY_CITING)
       await resetPackage(ALSO_UNCITED)
     }
+
+    // The restore has to land the cluster back on BOTH invariants, not just back on its rows. It
+    // puts foreign holds back after the clear reset the statuses that justified them, so restoring
+    // the holds alone is precisely how an open hold ends up on a package reading 'trusted'.
+    expect(await orphanedHeldPackages()).toEqual([])
+    expect(await heldPackagesNotMarked()).toEqual([])
+  })
+
+  /**
+   * Proof that the check above can fail — an invariant assertion nobody has ever seen go red is a
+   * comment with a green tick next to it.
+   *
+   * The violation is built the way the real one arrives: not by inventing an impossible row, but by
+   * writing `trust_state` without consulting `release_hold`, which is what every path that touches
+   * this table is one refactor away from doing. Scoped to a package this suite owns, and torn down
+   * whatever happens — the cluster-wide assertions are the point, and they run before this.
+   */
+  it('detects an open hold whose package is not marked held — the inverse the old check missed', async () => {
+    const hold = await commitHold({
+      packageId: UNMARKED_HELD,
+      releaseVersion: '3.0.0',
+      reason: 'held on signals alone, with no matching playbook arc',
+      matchedPlaybookId: null,
+      similarity: 0.55,
+      advisoryText: 'Hold 3.0.0 pending review.',
+      auditDetail: 'exists so the inverse invariant has something to catch',
+    })
+
+    try {
+      // `commitHold` writes both halves in one transaction, so nothing is wrong yet.
+      expect(await heldPackagesNotMarked()).not.toContain(UNMARKED_HELD)
+
+      await query(`UPDATE trust_state SET status = 'trusted', updated_at = now() WHERE package_id = $1`, [
+        UNMARKED_HELD,
+      ])
+
+      expect(await heldPackagesNotMarked()).toContain(UNMARKED_HELD)
+      // …and the original check is blind to it, which is the whole reason this one exists: the
+      // package no longer claims to be held, so there is no orphaned claim to find.
+      expect(await orphanedHeldPackages()).not.toContain(UNMARKED_HELD)
+
+      // A missing row is a violation too — `/api/state` reads absence as trusted, so deleting the
+      // status is the same lie as rewriting it.
+      await query('DELETE FROM trust_state WHERE package_id = $1', [UNMARKED_HELD])
+      expect(await heldPackagesNotMarked()).toContain(UNMARKED_HELD)
+
+      // Resolving the hold ends the violation without anyone touching trust_state again: the
+      // invariant is about OPEN holds, and a resolved one makes no claim on the status.
+      await commitUnhold(hold.holdId, 'maintainer@example.invalid', 'Reviewed: no takeover pattern.')
+      expect(await heldPackagesNotMarked()).not.toContain(UNMARKED_HELD)
+    } finally {
+      await resetPackage(UNMARKED_HELD)
+    }
+
+    expect(await heldPackagesNotMarked()).toEqual([])
+    expect(await orphanedHeldPackages()).toEqual([])
   })
 })

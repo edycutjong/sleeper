@@ -524,8 +524,9 @@
         <div class="case" role="group" aria-label="Case file: the xz incident">
           <div class="case-head">Case file &middot; from the public record</div>
           <dl>
-            <div class="row"><dt>package</dt><dd>xz-utils — a compression library on essentially every Linux machine</dd></div>
+            <div class="row"><dt>package</dt><dd>xz-utils — the compression library the 5.6.x backdoor shipped in</dd></div>
             <div class="row"><dt>cve</dt><dd><a href="https://nvd.nist.gov/vuln/detail/CVE-2024-3094" target="_blank" rel="noopener noreferrer">CVE-2024-3094</a> &middot; CVSS 10.0</dd></div>
+            <div class="row"><dt>reach</dt><dd>rolling &amp; pre-release channels only — Debian sid/testing, Fedora Rawhide, openSUSE Tumbleweed, Arch, Kali. <strong>No stable or LTS cut shipped it</strong> — <a href="#timeline">sources below</a>.</dd></div>
             <div class="row"><dt>planted</dt><dd>&asymp; Oct 2021 &rarr; Feb 2024 — 28 months</dd></div>
             <div class="row"><dt>found</dt><dd class="late">2024-03-29 — five weeks after it shipped, via 500&nbsp;ms of SSH latency. Luck, not process.</dd></div>
             <div class="row"><dt>in replay</dt><dd class="held">HELD at the 5.6.0 upload</dd></div>
@@ -567,7 +568,7 @@
           <div class="when">&asymp; 2021-06-15</div><div class="dot" aria-hidden="true"><i></i></div>
           <div class="tl-body">
             <div class="tl-top"><span class="chip slate">Lasse Collin &middot; maintainer</span><span class="kind">commit</span></div>
-            <p>One unpaid volunteer: irregular solo maintenance, a years-long backlog of unreviewed mailing-list patches — on a library nearly every Linux system links.</p>
+            <p>One unpaid volunteer: build fixes, translation updates, small portability corrections, at a slow and irregular cadence. The project has <strong>effectively one active maintainer</strong> and a years-long backlog of unreviewed mailing-list patches.</p>
             <p class="src"><a href="https://github.com/tukaani-project/xz/commits/master" target="_blank" rel="noopener noreferrer">source: tukaani-project/xz history</a></p>
           </div>
         </div></li>
@@ -785,6 +786,35 @@
         </div></li>
       </ol>
 
+      <p class="tl-foot">
+        <strong>How far it got, in checkable terms.</strong> The poisoned 5.6.x reached rolling and
+        pre-release channels and no further. Debian testing, unstable and experimental carried it from
+        <code>5.5.1alpha-0.1</code> up to and including <code>5.6.1-1</code>
+        (<a href="https://lists.debian.org/debian-security-announce/2024/msg00057.html" target="_blank" rel="noopener noreferrer">DSA-5649</a>);
+        Fedora Rawhide and Fedora 40, still unreleased at disclosure
+        (<a href="https://www.redhat.com/en/blog/urgent-security-alert-fedora-41-and-rawhide-users" target="_blank" rel="noopener noreferrer">Red&nbsp;Hat</a> —
+        that URL keeps the slug of its first posting; the text names Fedora Linux 40 and Rawhide.
+        Fedora 40 shipped <a href="https://fedoramagazine.org/announcing-fedora-linux-40/" target="_blank" rel="noopener noreferrer">2024-04-23</a>);
+        openSUSE Tumbleweed and MicroOS, 2024-03-07 to 2024-03-28
+        (<a href="https://news.opensuse.org/2024/03/29/xz-backdoor/" target="_blank" rel="noopener noreferrer">openSUSE</a>);
+        Kali, 2024-03-26 to 2024-03-29
+        (<a href="https://www.kali.org/blog/about-the-xz-backdoor/" target="_blank" rel="noopener noreferrer">Kali</a>);
+        and Arch, as <code>5.6.0-1</code> and <code>5.6.1-1</code>, where the loader never fired because it
+        only injected in Debian- and Fedora-style build environments
+        (<a href="https://archlinux.org/news/the-xz-package-has-been-backdoored/" target="_blank" rel="noopener noreferrer">Arch</a>).
+        Every stable and enterprise line that published a statement says it was clear: &ldquo;no Debian
+        stable versions are known to be affected&rdquo;, &ldquo;no versions of Red Hat Enterprise Linux
+        (RHEL) are affected by this CVE&rdquo;, and the malicious file &ldquo;is not present in SUSE Linux
+        Enterprise and/or openSUSE Leap&rdquo;.
+      </p>
+      <p class="tl-foot">
+        That is the impact statement, and it is a <strong>near miss</strong> rather than a catastrophe:
+        34 days of exposure, and not one stable or LTS cut carried it. Had 5.6.x survived into a Debian
+        stable or RHEL release, the affected population would have been orders of magnitude larger and the
+        removal far slower — and what stopped it was one engineer chasing a latency anomaly, which is not
+        a control anyone can schedule. <strong>No install-base figure appears on this page:</strong> every
+        number here carries a source, and that one has none we are willing to stand behind.
+      </p>
       <p class="tl-foot">&asymp; marks dates public sources give only to within a window — flagged <code>approximate: true</code> in the data. Event text is faithful paraphrase or direct quotation of public material, per the provenance note in <code>data/xz-timeline.json</code>.</p>
       <p class="tl-foot">Seven of the 25 events are not drawn above: four routine contribution beats, and three post-ship rows — the 5.6.1 rebuild of the backdoor and the push to get distributions shipping it — folded into the final row.</p>
     </div>
@@ -931,7 +961,17 @@
           <span class="num">STAGE 02</span>
           <h3>Roll the arc — from the database, not the feed</h3>
           <p>
-            At a release event the actor's history is read <strong>back out of CockroachDB</strong> — never
+            <strong>Nobody names the suspect.</strong> <code>rankCandidates</code>
+            (<code>src/agent.ts</code>) enumerates every actor the package's memory has seen, ranks them
+            by structural signals the memory layer already computed — can this account ship, how fast did
+            trust escalate, how build-shaped is the history, how new is it, was a handover argued for —
+            and the top few get an arc built. Ranking orders a list; it never reaches
+            <code>decide()</code>, which still sees playbook matches and nothing else. The honest limit:
+            on a package with one maintainer and one attacker this is a two-horse race, so the claim is
+            only that the agent picks its own suspects out of memory, not that the ordering is hard-won.
+          </p>
+          <p>
+            For each candidate the history is read <strong>back out of CockroachDB</strong> — never
             out of the seed file — filtered to what was knowable at the assessment timestamp, so a replay
             cannot leak hindsight into a past decision. <strong>Bedrock Claude</strong> (Converse) rolls it
             into a 90-day behavioural arc summary, embedded and stored in <code>actor_arcs</code> under the
@@ -1098,13 +1138,27 @@ npm run explain -- --hold <uuid>">copy</button></div>
             </dd>
             <dt>ccloud CLI <span class="status live">scripted</span></dt>
             <dd>
-              <code>scripts/provision.sh</code> (<code>npm run provision</code>) creates the Basic cluster
-              and two service identities with different privilege scopes: <code>ingest_svc</code> gets
-              <code>INSERT, SELECT</code> on <code>events</code> and nothing else, <code>gate_svc</code>
-              reads everything and writes only the tables a hold touches. Both have <code>admin</code>
-              revoked, and neither can delete. Executable <code>GRANT</code>s, not a README claim.
+              <code>scripts/provision.sh</code> (<code>npm run provision</code>) creates the Basic cluster,
+              the database, and <strong>two SQL identities split along the line that actually exists in
+              the code — setup versus runtime</strong>. <code>sleeper_admin</code> owns DDL, one cluster
+              setting, and the destructive setup paths (<code>npm run schema</code>,
+              <code>npm run seed</code>, <code>npm run replay</code>). <code>gate_svc</code> is the running
+              agent — webhook, decision, hold, unhold — with <strong>no DELETE anywhere, no DDL, and no
+              writes to the playbook</strong>. Applied as real SQL with <code>REVOKE admin</code>
+              included, because <code>ccloud cluster user create</code> makes admins and a split where
+              both sides are admin is decoration. Only with <code>--mcp-key</code> is a third identity
+              created: a read-only Cloud service account for the MCP audit surface, which lives on a
+              different auth plane and is not a SQL identity.
+              <br /><br />
+              An earlier version of this script created an <code>ingest_svc</code> holding
+              <code>INSERT, SELECT</code> on <code>events</code> alone. It was <strong>deleted, not
+              patched</strong>: it could not run the webhook it was named after — <code>ingestHandler</code>
+              calls <code>runReplay</code>, which writes five more tables, so an events-only identity
+              fails at <code>upsertActorArc</code>. A privilege boundary the code cannot honour reads as a
+              security property while being a comment. If you provisioned before the split changed,
+              <code>DROP USER ingest_svc</code>.
             </dd>
-            <dt>Managed MCP Server <span class="status">verified against the live Cloud server</span></dt>
+            <dt>Managed MCP Server <span class="status live">verified against the live Cloud server</span></dt>
             <dd>
               <code>src/mcp.ts</code> drives four MCP read tools — <code>select_query</code>,
               <code>explain_query</code>, <code>get_table_schema</code>, <code>show_statement</code> —
@@ -1168,15 +1222,21 @@ npm run explain -- --hold <uuid>">copy</button></div>
       <div class="codebox">
         <div class="cb-head"><span>terminal</span><button class="copy" type="button" aria-label="Copy the cluster provisioning commands" data-copy="ccloud auth login
 ccloud cluster create basic sleeper-cluster --cloud GCP --spend-limit 0
-ccloud cluster user create sleeper-cluster ingest_svc
+ccloud cluster user create sleeper-cluster sleeper_admin
 ccloud cluster user create sleeper-cluster gate_svc
 ccloud cluster sql --connection-url sleeper-cluster">copy</button></div>
         <pre><code><span class="pr">$</span> ccloud auth login
 <span class="pr">$</span> ccloud cluster create basic sleeper-cluster --cloud GCP --spend-limit 0
-<span class="pr">$</span> ccloud cluster user create sleeper-cluster ingest_svc   <span class="cm"># write path</span>
-<span class="pr">$</span> ccloud cluster user create sleeper-cluster gate_svc     <span class="cm"># decision path</span>
-<span class="pr">$</span> ccloud cluster sql --connection-url sleeper-cluster     <span class="cm"># -&gt; DATABASE_URL</span></code></pre>
+<span class="pr">$</span> ccloud cluster user create sleeper-cluster sleeper_admin <span class="cm"># setup path: DDL, seed, replay</span>
+<span class="pr">$</span> ccloud cluster user create sleeper-cluster gate_svc      <span class="cm"># runtime path: no DELETE, no DDL</span>
+<span class="pr">$</span> ccloud cluster sql --connection-url sleeper-cluster      <span class="cm"># -&gt; DATABASE_URL</span></code></pre>
       </div>
+      <p class="run-note">
+        <code>npm run provision</code> runs all of this and then applies the privilege split as real
+        SQL — <code>ccloud cluster user create</code> alone makes two admins, which is not a boundary.
+        <code>--dry-run</code> prints every command first; <code>--mcp-key</code> additionally creates
+        the read-only Cloud service account the MCP audit surface authenticates as.
+      </p>
 
       <h3>2 &middot; Load, calibrate, replay <span class="mono-tag">— live Bedrock inference</span></h3>
       <div class="codebox">
@@ -1220,18 +1280,18 @@ npm run schema && npm run seed && npm run calibrate && npm run replay">copy</but
         refuses to run in this mode at all.
       </p>
 
-      <h3>4 &middot; Tests <span class="mono-tag">— 247 in the suite</span></h3>
+      <h3>4 &middot; Tests <span class="mono-tag">— 266 in the suite</span></h3>
       <div class="codebox">
         <div class="cb-head"><span>terminal</span><button class="copy" type="button" aria-label="Copy the test commands" data-copy="npm test">copy</button></div>
         <pre><code><span class="pr">$</span> npm test   <span class="cm"># cluster-dependent tests skip without DATABASE_URL</span>
 <span class="pr">$</span> DATABASE_URL='postgresql://root@localhost:26257/sleeper?sslmode=disable' npm test
 
 <span class="cm"># with no DATABASE_URL and no credentials:</span>
-<span class="hl">Tests  206 passed | 41 skipped (247)</span></code></pre>
+<span class="hl">Tests  221 passed | 45 skipped (266)</span></code></pre>
       </div>
       <p class="run-note">
-        <strong>247 tests.</strong> On a bare clone with no credentials, <strong>168 pass</strong> and
-        <strong>39 skip</strong> pending a live cluster — the 39 assert the <code>prefix spans</code> plan
+        <strong>266 tests.</strong> On a bare clone with no credentials, <strong>221 pass</strong> and
+        <strong>45 skip</strong> pending a live cluster — the 45 assert the <code>prefix spans</code> plan
         line, held-out exclusion, the all-or-nothing hold and unhold transactions, and point-in-time
         correctness (a decision can never see an event from after its own assessment timestamp). They
         namespace every row to a per-run package id, so they are safe to point at the demo cluster. Those
@@ -1263,11 +1323,11 @@ npm run schema && npm run seed && npm run calibrate && npm run replay">copy</but
         <div class="ledger-card reveal">
           <h3>True today</h3>
           <ul>
-            <li><strong>247 tests</strong> — 168 pass on a bare clone, 39 skip until a live cluster is reachable.</li>
+            <li><strong>266 tests</strong> — 221 pass on a bare clone, 45 skip until a live cluster is reachable.</li>
             <li>The hold is <strong>all-or-nothing under an explicit rollback test</strong>, and history reads are bounded by the assessment timestamp.</li>
             <li>A hold has <strong>a recorded way out</strong>: <code>commitUnhold</code> flips trust state, queues a retraction advisory and appends an audit row in one transaction, and the hold row itself is append-only.</li>
-            <li>Two service identities with distinct privilege scopes (<code>ingest_svc</code> / <code>gate_svc</code>), provisioned by script.</li>
-            <li>Managed MCP Server client: <strong>written and unit-tested, not yet run against the live server.</strong></li>
+            <li>Two SQL identities split <strong>setup versus runtime</strong>, provisioned by script and applied as real <code>GRANT</code>s: <code>sleeper_admin</code> (DDL and the destructive setup paths) and <code>gate_svc</code> (the running agent — <strong>no DELETE anywhere, no DDL, no playbook writes</strong>). With <code>--mcp-key</code>, a third identity is created for the audit surface: a read-only Cloud service account, which is not a SQL identity. An earlier <code>ingest_svc</code> was <strong>deleted rather than patched</strong> — it could not run the webhook it was named after.</li>
+            <li>Managed MCP Server client: <strong>verified end to end against the live Cloud server</strong> — <code>npm run mcp:audit</code> drives all four tools against <code>cockroachlabs.cloud/mcp</code>, and <code>explain_query</code> returns <code>prefix spans: [/'xz-utils' - /'xz-utils']</code> computed server-side. The caveat that run produced: the credential is <strong>write-capable</strong>. No CockroachDB Cloud role grants MCP reads without writes, and <code>tools/list</code> is not role-filtered, so this path is read-only because the client only ever builds SELECT, EXPLAIN and SHOW — <strong>not because the server prevents anything</strong>. The enforced boundary is <code>gate_svc</code>, at the SQL layer.</li>
             <li>Lambda handlers: <strong>written and typechecked, not yet deployed.</strong> Nothing here is running in production.</li>
             <li>A decision with no benign neighbour to contrast against <strong>refuses to hold</strong> rather than passing on a similarity score alone.</li>
           </ul>
@@ -1296,7 +1356,7 @@ npm run schema && npm run seed && npm run calibrate && npm run replay">copy</but
             </tr>
             <tr>
               <td>Technical Implementation</td>
-              <td>Three inline vector indexes, <code>&lt;=&gt;</code> retrieval with an <code>EXPLAIN</code>-asserted <code>prefix spans</code> pre-filter, one ACID hold transaction, 247 tests. <a href="#architecture">&sect; Architecture</a></td>
+              <td>Three inline vector indexes, <code>&lt;=&gt;</code> retrieval with an <code>EXPLAIN</code>-asserted <code>prefix spans</code> pre-filter, one ACID hold transaction, 266 tests. <a href="#architecture">&sect; Architecture</a></td>
             </tr>
             <tr>
               <td>Real-World Impact</td>
@@ -1308,7 +1368,7 @@ npm run schema && npm run seed && npm run calibrate && npm run replay">copy</but
             </tr>
             <tr>
               <td>Creativity &amp; Originality</td>
-              <td>A release gate that argues from years rather than diffs, with a two-sided gate so patient memory does not become a wolf-crier. <a href="#memory">&sect; The two-sided gate</a></td>
+              <td><strong>Retrieval is the actuator, not an answer</strong> — its output goes straight into the four-write transaction that blocks the release; nothing here terminates in a recommendation awaiting a human. And <strong>the agent enumerates its own suspects</strong> out of the package's memory rather than being handed the account to judge, which is precisely the state the world was in for the 2.5 years the real attack ran. <a href="#architecture">&sect; Architecture — stages 02 and 05</a></td>
             </tr>
           </tbody>
         </table>

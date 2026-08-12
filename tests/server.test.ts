@@ -134,15 +134,35 @@ describe.skipIf(!LIVE)('demo server', () => {
       expect(b.audit.reason.length).toBeGreaterThan(0)
     })
 
-    it('never returns a raw error message on a failing route', async () => {
-      // A malformed hold id makes `assertUuid` throw deep inside the audit read.
+    it('rejects a malformed hold id with 400, and never returns a raw error message', async () => {
+      // This used to be a 500: `assertUuid` threw deep inside the audit read and landed in the
+      // catch-all, reporting a caller-fixable mistake as a server fault.
       const res = await fetch(`${BASE}/api/hold/not-a-uuid`)
-      expect(res.status).toBe(500)
+      expect(res.status).toBe(400)
       const b = await readJson(res)
-      expect(b).toMatchObject({ error: 'internal_error' })
-      expect(b.ref).toMatch(/^[0-9a-f]{8}$/)
-      // The thing that must not be there: any prose from the underlying error.
+      expect(b).toMatchObject({ error: 'invalid_hold_id' })
+      expect(b.corrId).toMatch(/^[0-9a-f]{8}$/)
+      // The thing that must not be there: any prose from the underlying error. `assertUuid` echoes
+      // the caller's own input back inside its message, and that message stays in the log.
       expect(JSON.stringify(b)).not.toMatch(/uuid|assert|postgres|sslmode|26257/i)
+    })
+
+    it('rejects a malformed percent-escape in the hold id with 400 too', async () => {
+      // `decodeURIComponent` raises URIError on a truncated escape — same class of caller mistake,
+      // and it reached the same catch-all.
+      const res = await fetch(`${BASE}/api/hold/%E0%A4%A`)
+      expect(res.status).toBe(400)
+      const b = await readJson(res)
+      expect(b).toMatchObject({ error: 'invalid_hold_id' })
+      expect(JSON.stringify(b)).not.toMatch(/uuid|assert|postgres|sslmode|26257/i)
+    })
+
+    it('still answers 404 for a well-formed hold id that does not exist', async () => {
+      // The 400 above must not have swallowed the absent case: "you sent nonsense" and "that hold
+      // is not here" are different answers.
+      const res = await fetch(`${BASE}/api/hold/00000000-0000-0000-0000-000000000000`)
+      expect(res.status).toBe(404)
+      expect(await readJson(res)).toMatchObject({ error: 'no_such_hold' })
     })
   })
 

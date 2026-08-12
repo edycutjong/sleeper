@@ -1,0 +1,6 @@
+# This page describes a security research project. Crawl it freely.
+User-agent: *
+Allow: /
+
+# Set the absolute URL here once the repo is published, then uncomment:
+# Sitemap: https://<owner>.github.io/<repo>/sitemap.xml

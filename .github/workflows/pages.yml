@@ -1,0 +1,60 @@
+name: Pages
+
+# GitHub Pages serves the repository root or /docs and nothing else. This project keeps its
+# judge-facing page in /site instead — a folder named for what it holds rather than for what
+# GitHub happens to special-case — so the page is published by this workflow rather than by the
+# built-in /docs convention.
+#
+# The cost of that choice, stated plainly: Pages must be set to "GitHub Actions" as its source
+# (Settings -> Pages -> Build and deployment -> Source). If it is left on "Deploy from a branch",
+# nothing here runs and the site is simply not published. Moving /site back to /docs would remove
+# this file and the setting along with it.
+
+on:
+  push:
+    branches: [main]
+    paths: ['site/**', '.github/workflows/pages.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; never cancel a running one, because cancelling mid-deploy can leave the
+# site serving a half-published state.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the page is self-contained
+        # The page is a single file with everything inlined, and it must stay that way: no CDN,
+        # no external stylesheet, no runtime fetch. A judge opening it offline, or behind a
+        # corporate proxy, should see exactly what we see. This fails the build rather than
+        # discovering it in front of them.
+        run: |
+          if grep -qE '<script[^>]+src=|<link[^>]+href="https?://' site/index.html; then
+            echo "::error file=site/index.html::the page pulls an external script or stylesheet — it must be self-contained"
+            grep -nE '<script[^>]+src=|<link[^>]+href="https?://' site/index.html
+            exit 1
+          fi
+          for asset in $(grep -oE '(src|href)="assets/[^"]+"' site/index.html | cut -d'"' -f2 | sort -u); do
+            test -f "site/$asset" || { echo "::error::site/index.html references missing $asset"; exit 1; }
+          done
+          echo "self-contained, and every referenced asset exists"
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4

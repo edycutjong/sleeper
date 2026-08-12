@@ -48,8 +48,35 @@ CREATE TABLE IF NOT EXISTS events (
   -- assessment and are ordered by time. Without these they are full scans of every package's
   -- entire history — the one access pattern this project cannot afford to be slow at, because the
   -- whole claim is that the multi-year arc is what makes the decision.
-  INDEX events_pkg_actor_time_idx (package_id, actor_id, occurred_at),
-  INDEX events_pkg_time_idx (package_id, occurred_at),
+  --
+  -- The STORING lists are the rest of each read's SELECT list, and they are not decoration. Key
+  -- columns alone make the index findable but not sufficient: the plan was a `revscan` of the
+  -- index followed by an `index join` back into events@events_pkey to fetch kind, content and
+  -- source_url — up to SLEEPER_HISTORY_LIMIT (5,000) primary-key lookups per assessment, for rows
+  -- the scan had already found. With the payload in the index both reads are covering and the
+  -- `index join` node disappears from EXPLAIN entirely; tests/integration.test.ts asserts its
+  -- absence, and CockroachDB's own `index recommendations:` line prints exactly these two lists.
+  -- `id` needs no mention: it is the primary key, so every secondary index carries it already.
+  --
+  -- The cost is real and paid on write: `content` is now stored twice per event, so ingest writes
+  -- more bytes and the table is meaningfully larger. That is the right way round only because of
+  -- this workload's shape — one write per event, a full history read per assessment — and it would
+  -- be the wrong trade for a table that is mostly written and rarely read back.
+  --
+  -- On a cluster created before this change, `CREATE TABLE IF NOT EXISTS` is a no-op and the old
+  -- key-only indexes survive, so the covering-index test stays red until they are replaced. That
+  -- does not require dropping `events` and losing its history — the indexes can be swapped in
+  -- place, one at a time:
+  --   DROP INDEX events@events_pkg_actor_time_idx;
+  --   CREATE INDEX events_pkg_actor_time_idx ON events (package_id, actor_id, occurred_at)
+  --     STORING (kind, content, source_url);
+  --   DROP INDEX events@events_pkg_time_idx;
+  --   CREATE INDEX events_pkg_time_idx ON events (package_id, occurred_at)
+  --     STORING (actor_id, kind, content, source_url);
+  INDEX events_pkg_actor_time_idx (package_id, actor_id, occurred_at) STORING (kind, content, source_url),
+  -- actor_id is STORED here rather than keyed: the package-wide read selects it (it is how a
+  -- no-history pressure account is spotted) but never constrains on it.
+  INDEX events_pkg_time_idx (package_id, occurred_at) STORING (actor_id, kind, content, source_url),
   UNIQUE INDEX events_event_key_idx (event_key)
 );
 

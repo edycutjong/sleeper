@@ -18,6 +18,7 @@ import { config } from './config.js'
 import { loadThresholds, loadTimeline } from './corpus.js'
 import { runReplay, type Step, type TimelineEvent } from './agent.js'
 import { closePool } from './db.js'
+import { assertPlaybookModel } from './memory.js'
 import { newCorrId, recordFailure } from './log.js'
 
 type LambdaResponse = { statusCode: number; headers: Record<string, string>; body: string }
@@ -111,6 +112,29 @@ function parseEvent(event: WebhookEvent): TimelineEvent {
   }
 }
 
+/**
+ * The corpus/model check, once per cold start.
+ *
+ * A Lambda has no boot the way src/server.ts does, so "once at startup" is once per execution
+ * context: the first invocation pays a cheap `GROUP BY` and every later one on the same container
+ * pays nothing. Without it the check only ever ran on the empty-match path inside `matchPlaybook`,
+ * i.e. at the moment a release was being assessed.
+ *
+ * Note what it does NOT cover: it throws only when a corpus embedded by a DIFFERENT model is
+ * present. An empty playbook passes silently, by design — this is not a "did you seed?" check.
+ *
+ * A failed check clears the memo rather than caching the rejection. A permanent mismatch simply
+ * re-throws on the next invocation (one extra query, and the message is the fix); a transient
+ * cluster error, cached, would wedge every later invocation on a warm container behind a fault
+ * that had already passed.
+ */
+let checked: Promise<void> | null = null
+const ensurePlaybookModel = (): Promise<void> =>
+  (checked ??= assertPlaybookModel().catch((err: unknown) => {
+    checked = null
+    throw err
+  }))
+
 /** One webhook-shaped event into memory, assessed against everything already there. */
 export async function ingestHandler(event: WebhookEvent): Promise<LambdaResponse> {
   const corrId = newCorrId()
@@ -123,6 +147,10 @@ export async function ingestHandler(event: WebhookEvent): Promise<LambdaResponse
     // body). Every failure this function can have now leaves through the same structured response.
     const { thresholds } = loadThresholds()
     const parsed = parseEvent(event)
+    // Inside the try for the same reason as `loadThresholds`: thrown from outside it, this leaves
+    // as a bare 502 with no body. After `parseEvent` so a payload we were going to 400 anyway does
+    // not cost a round trip to the cluster — this still runs before anything is assessed.
+    await ensurePlaybookModel()
 
     const summary = await runReplay(
       {
@@ -171,6 +199,8 @@ export async function replayHandler(): Promise<LambdaResponse> {
   try {
     const { thresholds } = loadThresholds()
     const timeline = loadTimeline(config.packageId)
+    // Inside the try, like `loadThresholds` — outside it the failure leaves as a bare 502.
+    await ensurePlaybookModel()
     const summary = await runReplay(
       {
         packageId: timeline.packageId,

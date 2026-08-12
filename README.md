@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/icon.svg" width="96" alt="Sleeper" />
+<img src="site/assets/icon.svg" width="96" alt="Sleeper" />
 
 # Sleeper
 
@@ -13,7 +13,7 @@ review can see, and atomically **holds** the poisoned release before it ships.
 **A 90-day slice of the xz attack is three innocuous commits. The signal only exists across years —
 so the memory layer *is* the product.**
 
-<img src="docs/assets/readme-hero.png" alt="Sleeper" width="820" />
+<img src="site/assets/readme-hero.png" alt="Sleeper" width="820" />
 
 <br />
 
@@ -25,7 +25,7 @@ so the memory layer *is* the product.**
 ![AWS Bedrock](https://img.shields.io/badge/AWS-Bedrock-FF9900?style=flat-square)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178C6?style=flat-square)
 ![Node](https://img.shields.io/badge/Node-%E2%89%A522-339933?style=flat-square)
-![Tests](https://img.shields.io/badge/tests-262_passing-22C55E?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-266_passing-22C55E?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 
 </div>
@@ -34,8 +34,9 @@ so the memory layer *is* the product.**
 
 ## 🕯️ The problem
 
-On 2024-03-29 a backdoor was found in **xz-utils** ([CVE-2024-3094](https://nvd.nist.gov/vuln/detail/CVE-2024-3094)) — a
-compression library running on essentially every Linux machine on Earth. It had been planted over
+On 2024-03-29 a backdoor was found in **xz-utils**, a compression library
+([CVE-2024-3094](https://nvd.nist.gov/vuln/detail/CVE-2024-3094), CVSS 10.0 — the score is in
+`data/xz-timeline.json` with its citation). It had been planted over
 roughly two and a half years by a contributor who built trust one innocuous commit at a time:
 real bug fixes, plausible mailing-list posts, patient helpfulness toward an exhausted sole
 maintainer, two sockpuppet accounts pressuring him to hand over control, and finally release-signing
@@ -48,6 +49,30 @@ handover completed, and a maintainer who ended up reviewing his own release arti
 
 It was found five weeks after the poisoned tarball shipped, because one engineer got curious about
 **500 ms of unexplained SSH login latency**. That is not a process. That is luck.
+
+**How far it got — the checkable version.** The poisoned 5.6.x reached rolling and pre-release
+channels and no further. Debian testing, unstable and experimental carried it, from
+`5.5.1alpha-0.1` up to and including `5.6.1-1`
+([DSA-5649](https://lists.debian.org/debian-security-announce/2024/msg00057.html)); Fedora Rawhide
+and Fedora 40, which was still unreleased at disclosure
+([Red Hat](https://www.redhat.com/en/blog/urgent-security-alert-fedora-41-and-rawhide-users) — that
+URL keeps the slug of its first posting; the text names Fedora Linux 40 and Rawhide. Fedora 40
+shipped [2024-04-23](https://fedoramagazine.org/announcing-fedora-linux-40/)); openSUSE
+Tumbleweed and MicroOS, 2024-03-07 to 2024-03-28
+([openSUSE](https://news.opensuse.org/2024/03/29/xz-backdoor/)); Kali, 2024-03-26 to 2024-03-29
+([Kali](https://www.kali.org/blog/about-the-xz-backdoor/)); and Arch, as `5.6.0-1` and `5.6.1-1`,
+where the loader never fired because it only injected in Debian- and Fedora-style build
+environments ([Arch](https://archlinux.org/news/the-xz-package-has-been-backdoored/)). Every stable
+and enterprise line that published a statement says it was clear: "no Debian stable versions are
+known to be affected", "no versions of Red Hat Enterprise Linux (RHEL) are affected by this CVE",
+and the malicious file "is not present in SUSE Linux Enterprise and/or openSUSE Leap".
+
+So the honest impact statement is a near miss: **34 days of exposure, and not one stable or LTS cut
+carried it.** Had 5.6.x survived into a Debian stable or RHEL release, the affected population would
+have been orders of magnitude larger and the removal far slower — and the thing that stopped it was
+one engineer chasing a latency anomaly, which is not a control anyone can schedule. No install-base
+number appears in this repo: every figure here carries a source, and that one has none we are
+willing to stand behind.
 
 ## 🌒 What Sleeper does
 
@@ -237,15 +262,15 @@ Full setup, reproduction steps and benchmark methodology: **[DEMO.md](DEMO.md)**
 
 ## 🧪 Tests
 
-**262 tests.** On a fresh clone with no database and no AWS account, `npm test` prints
-`221 passed | 41 skipped (262)` — that is the honest output, and it is the one you should expect.
-The 41 need a reachable cluster; point `DATABASE_URL` at one and it becomes `262 passed`.
+**266 tests.** On a fresh clone with no database and no AWS account, `npm test` prints
+`221 passed | 45 skipped (266)` — that is the honest output, and it is the one you should expect.
+The 45 need a reachable cluster; point `DATABASE_URL` at one and it becomes `266 passed`.
 
 The gate is reachability, not configuration: a `DATABASE_URL` that is set but does not answer skips
 those 39 and prints why, naming the host and the driver's error. A stale credential should not look
 like broken code.
 
-The cluster-backed 41 assert the `prefix spans` plan line on both the neighbour query *and* the
+The cluster-backed 45 assert the `prefix spans` plan line on both the neighbour query *and* the
 query that actually makes the decision, held-out exclusion, all-or-nothing hold and unhold
 transactions, ingest idempotency under a retried delivery, and point-in-time correctness (a
 decision can never see an event from after its own assessment timestamp).

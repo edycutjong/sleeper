@@ -60,6 +60,76 @@ sits.
 
 ---
 
+## 1b. The privilege split, verified rather than asserted
+
+`scripts/provision.sh` creates two SQL identities split along the line that actually exists in the
+code — setup versus runtime. The interesting one is `gate_svc`, the identity the running agent uses,
+and the interesting property is what it **cannot** do: it holds no DELETE on any table, no DDL, and
+no writes to the corpus it is judged against.
+
+That is easy to claim and cheap to check, so here it is checked, against the real CockroachDB Cloud
+cluster:
+
+```
+$ cockroach sql --url "$GATE_SVC_URL" -e 'SHOW GRANTS ON TABLE events FOR gate_svc'
+database_name	schema_name	table_name	grantee	privilege_type	is_grantable
+sleeper	public	events	gate_svc	INSERT	f
+sleeper	public	events	gate_svc	SELECT	f
+
+$ cockroach sql --url "$GATE_SVC_URL" -e 'DELETE FROM events WHERE false'
+ERROR: user gate_svc does not have DELETE privilege on relation events
+SQLSTATE: 42501
+
+$ cockroach sql --url "$GATE_SVC_URL" -e 'DELETE FROM audit_log WHERE false'
+ERROR: user gate_svc does not have DELETE privilege on relation audit_log
+SQLSTATE: 42501
+
+$ cockroach sql --url "$GATE_SVC_URL" -e 'DELETE FROM release_hold WHERE false'
+ERROR: user gate_svc does not have DELETE privilege on relation release_hold
+SQLSTATE: 42501
+
+$ cockroach sql --url "$GATE_SVC_URL" -e 'DELETE FROM takeover_playbook WHERE false'
+ERROR: user gate_svc does not have DELETE privilege on relation takeover_playbook
+SQLSTATE: 42501
+
+$ cockroach sql --url "$GATE_SVC_URL" -e 'INSERT INTO takeover_playbook ...'
+ERROR: user gate_svc does not have INSERT privilege on relation takeover_playbook
+SQLSTATE: 42501
+
+$ cockroach sql --url "$GATE_SVC_URL" -e 'SET CLUSTER SETTING feature.vector_index.enabled = true'
+ERROR: only users with the MODIFYCLUSTERSETTING privilege are allowed to set cluster setting 'feature.vector_index.enabled'
+SQLSTATE: 42501
+
+$ cockroach sql --url "$GATE_SVC_URL" -e 'DROP TABLE audit_log'
+ERROR: user gate_svc does not have DROP privilege on relation audit_log
+SQLSTATE: 42501
+
+$ cockroach sql --url "$GATE_SVC_URL" -e 'SELECT count(*) FROM events'   -- the reads it DOES need
+events_readable
+25
+```
+
+Six refusals, every one `SQLSTATE 42501`, and the reads the agent genuinely needs still working. What
+that buys, concretely: the agent that writes a hold cannot erase it, cannot erase the advisory
+queued alongside it, cannot erase the audit row, and cannot edit the playbook it is being measured
+against. Those are the four ways an append-only paper trail usually stops being append-only.
+
+Two honest limits.
+
+**The boundary is operational, not in-process.** `src/db.ts` builds one pool from one `DATABASE_URL`;
+nothing in `src/` switches identity at runtime. Which identity is in force is decided by which URL
+you export for which command — `sleeper_admin` for `npm run schema` / `seed` / `replay`, `gate_svc`
+for the deployed webhook. `npm start` is the honest exception: its replay button resets memory, so
+the local demo server needs the admin URL.
+
+**`gate_svc` holds table-wide UPDATE on `release_hold`.** It is needed for `commitUnhold`, which
+appends a resolution in place. It also means the append-only property of `reason` and `similarity`
+is enforced by application code rather than by a grant. CockroachDB supports column-scoped
+`GRANT UPDATE(resolution, resolved_by, resolved_at, resolution_note)`; using it would move that
+guarantee into the database, and this project has not done it yet.
+
+---
+
 ## 2. The hero replay
 
 ```bash

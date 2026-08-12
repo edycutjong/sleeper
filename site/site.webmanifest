@@ -1,0 +1,14 @@
+{
+  "name": "Sleeper — the release gate that remembers",
+  "short_name": "Sleeper",
+  "description": "A release-gate agent whose multi-year memory in CockroachDB recognises a slow supply-chain takeover and holds the poisoned release.",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#0A0F1D",
+  "theme_color": "#0A0F1D",
+  "icons": [
+    { "src": "assets/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "assets/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "assets/icon-1024.png", "sizes": "1024x1024", "type": "image/png" }
+  ]
+}

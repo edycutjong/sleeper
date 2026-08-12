@@ -24,8 +24,14 @@ import { loadThresholds, loadTimeline, type CalibratedThresholds } from './corpu
 import { FALLBACK_THRESHOLDS, type Thresholds } from './decide.js'
 import { OFFLINE, providerBanner } from './embeddings.js'
 import { runReplay, type Step } from './agent.js'
-import { auditReader, explainScopedVia, holdEvidence, loadActorArc } from './memory.js'
-import { resolveMcpMode, type SqlReader } from './mcp.js'
+import {
+  assertPlaybookModel,
+  auditReader,
+  explainScopedVia,
+  holdEvidence,
+  loadActorArc,
+} from './memory.js'
+import { assertUuid, resolveMcpMode, type SqlReader } from './mcp.js'
 import { closePool, query } from './db.js'
 import { createLogger, emit, newCorrId, recordFailure } from './log.js'
 
@@ -442,7 +448,36 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
 
     if (route === '/api/explain') return handleExplain(res, corrId)
     if (route.startsWith('/api/hold/')) {
-      return handleHold(res, decodeURIComponent(route.slice('/api/hold/'.length)), corrId)
+      /**
+       * A malformed hold id is the caller's mistake, so it answers 400 — it used to answer 500.
+       *
+       * Two throws reached the catch-all below: `decodeURIComponent` raises URIError on a truncated
+       * escape (`/api/hold/%E0%A4%A`), and `assertUuid`, called deep inside the audit read, raises
+       * on anything that is not a UUID. Both came back as `internal_error` with an error-level line
+       * and a stack — a page-worthy server fault reported for something no server-side change can
+       * fix, inflating exactly the rate a monitor alerts on. src/handler.ts already draws this line
+       * with BadRequestError; this is the same line, drawn on the demo surface.
+       *
+       * Validated here rather than with a local regex so there is still one definition of "is a
+       * UUID" — `assertUuid` also stays where it is, guarding the SQL interpolation itself.
+       * A well-formed id that simply does not exist is NOT this case: it still 404s below.
+       */
+      let holdId: string
+      try {
+        holdId = assertUuid(decodeURIComponent(route.slice('/api/hold/'.length)))
+      } catch (err) {
+        // warn, not error: nothing here is broken. And the message stays out of the response —
+        // `assertUuid` echoes the caller's input back inside it, which is useful in a log and is
+        // the one thing this server never puts on the wire.
+        emit('warn', 'hold.invalid_id', {
+          corrId,
+          route,
+          reason: err instanceof URIError ? 'malformed_escape' : 'not_a_uuid',
+        })
+        json(res, 400, { error: 'invalid_hold_id', corrId })
+        return
+      }
+      return handleHold(res, holdId, corrId)
     }
     json(res, 404, { error: 'not_found' })
   }
@@ -470,6 +505,39 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       })
     })
 })
+
+/**
+ * The corpus/model check, run once at boot instead of at the moment a decision is due.
+ *
+ * `assertPlaybookModel` was exported so an entry point could call it and no entry point ever did:
+ * its only caller was the empty-match path inside `matchPlaybook`. A process pointed at a corpus
+ * embedded by a different model therefore started, reported health `ok`, and refused only once a
+ * release was being assessed — mid-recording, in the demo's case. Its thrown message is a complete
+ * operator instruction (re-seed, or point the process back at the model that wrote the corpus), so
+ * a boot that dies printing it is worth more than a server that comes up unable to decide.
+ *
+ * Top-level await rather than the `listen` callback, which is synchronous and cannot await it.
+ *
+ * Honest about the limit: this only fires when a corpus embedded by a DIFFERENT model exists. An
+ * empty playbook passes silently, by design — so it is not a "did you run `npm run seed`?" check
+ * and an untouched cluster will sail through it.
+ */
+try {
+  await assertPlaybookModel()
+} catch (err) {
+  /**
+   * A cluster that could not answer the query is not the same as a check that said no, and it does
+   * not stop the boot. Unreachable-at-startup — or a table being recreated by a migration at that
+   * instant — is exactly what `/api/health` exists to report as 503 and what `/api/state` degrades
+   * for, and neither can report anything from a process that refused to listen.
+   *
+   * Discriminated on the message because there is no error class to test: memory.ts throws a plain
+   * `Error`. If that message is ever reworded this stops being fatal at boot, which is the safe
+   * direction to fail — the same check still runs on the empty-match path before any decision.
+   */
+  if (err instanceof Error && /embedding model mismatch/i.test(err.message)) throw err
+  recordFailure('startup.playbook_model_uncheckable', err)
+}
 
 server.listen(config.port, BIND_HOST, () => {
   // stdout stays human: this banner is what a judge sees in the terminal during a recording. The
