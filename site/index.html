@@ -24,6 +24,10 @@
   :root {
     --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
     --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    /* motion tokens — every transition on this page draws from these two */
+    --dur-fast: 120ms;   /* hover / press feedback */
+    --dur-in: 200ms;     /* entrance reveal */
+    --ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);
     /* dark is the native theme of the brand assets */
     --bg: #0A0F1D;
     --bg-soft: #0D1424;
@@ -109,8 +113,13 @@
     -webkit-text-size-adjust: 100%;
     overflow-x: clip;
   }
-  a { color: var(--amber-text); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
-  a:hover { text-decoration-thickness: 2px; }
+  /* quiet links: mid -> high contrast, underline offset + weight ease in */
+  a {
+    color: var(--amber-text); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px;
+    transition: color var(--dur-fast) var(--ease-out), text-decoration-color var(--dur-fast) var(--ease-out),
+                text-decoration-thickness var(--dur-fast) var(--ease-out), text-underline-offset var(--dur-fast) var(--ease-out);
+  }
+  a:hover { text-decoration-thickness: 2px; text-underline-offset: 4px; }
   :focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; border-radius: 2px; }
   /* plates are dark in both themes, so the ring has to stay light there */
   .codebox :focus-visible { outline-color: var(--amber); }
@@ -141,14 +150,31 @@
     border-bottom: 1px solid var(--border-soft);
   }
   .site-row { display: flex; align-items: center; gap: 1rem; padding: 0.65rem 0; }
-  .brand { display: flex; flex: 0 0 auto; align-items: center; gap: 0.55rem; text-decoration: none; color: var(--ink); font-weight: 800; letter-spacing: 0.01em; }
+  .brand { display: flex; flex: 0 0 auto; align-items: center; gap: 0.55rem; text-decoration: none; color: var(--ink); font-weight: 800; letter-spacing: 0.01em; transition: transform var(--dur-fast) var(--ease-out); }
+  .brand:active { transform: translateY(1px) scale(0.99); }
+  /* The mark carries `text-decoration: none`, so the generic link hover below is invisible on it —
+     without this it is the one clickable thing on the page that looks inert until you press it. */
+  .brand:hover { color: var(--amber-text); }
+  .brand:hover img { transform: scale(1.04); }
+  .brand img { transition: transform var(--dur-fast) var(--ease-out); }
+
+  /* Press feedback for prose links — source citations, cross-references, the CVE link, the footer.
+     Hover and focus were already covered; this is the third state. Deliberately smaller than the
+     button treatment: a citation that lurched on click would read as a mis-tap, so it is a 1px
+     settle with no scale. Inline text must not reflow, which rules out anything that changes
+     metrics — hence `transform` on an inline-block, and nothing touching font or padding. */
+  a:not(.btn):not(.copy):not(.brand):not(nav.top a):active {
+    transform: translateY(1px);
+    display: inline-block;
+  }
   .brand img { width: 30px; height: 30px; display: block; }
   /* min-width:0 lets the nav shrink instead of pushing the header past the viewport */
   nav.top { margin-left: auto; min-width: 0; overflow-x: auto; scrollbar-width: none; }
   nav.top::-webkit-scrollbar { display: none; }
   nav.top ul { display: flex; gap: 1.1rem; list-style: none; margin: 0; padding: 0; white-space: nowrap; }
-  nav.top a { color: var(--mut); text-decoration: none; font-size: 0.86rem; font-weight: 600; }
+  nav.top a { display: inline-block; color: var(--mut); text-decoration: none; font-size: 0.86rem; font-weight: 600; transition: color var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out); }
   nav.top a:hover { color: var(--ink); }
+  nav.top a:active { transform: translateY(1px); }
 
   /* ---------- hero ---------- */
   .hero { padding: 3.4rem 0 0.6rem; }
@@ -173,11 +199,13 @@
   .btn {
     display: inline-block; text-decoration: none; font-weight: 700; font-size: 0.95rem;
     padding: 0.72rem 1.25rem; border-radius: 10px; border: 1px solid transparent;
-    transition: transform 0.12s ease, box-shadow 0.12s ease, background-color 0.12s ease;
+    transition: transform var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out),
+                border-color var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out);
   }
-  .btn:hover { transform: translateY(-1px); }
-  .btn:active { transform: translateY(0); }
-  .btn.primary { background: var(--amber); color: var(--btn-ink); box-shadow: 0 4px 18px rgba(255, 178, 36, 0.22); }
+  .btn:hover:not(:disabled) { transform: translateY(-1px); }
+  .btn:active:not(:disabled) { transform: translateY(1px) scale(0.99); }
+  .btn.primary { background: var(--amber); color: var(--btn-ink); box-shadow: 0 4px 18px color-mix(in srgb, var(--amber) 24%, transparent); }
+  .btn.primary:hover:not(:disabled) { box-shadow: 0 6px 26px color-mix(in srgb, var(--amber) 38%, transparent); }
   .btn.ghost { color: var(--ink); border-color: var(--border); background: transparent; }
   .btn.ghost:hover { border-color: var(--amber); }
 
@@ -267,6 +295,11 @@
   .chip.violet { background: var(--chip-violet-bg); color: var(--violet-text); }
   .chip.slate { background: var(--chip-slate-bg); color: var(--chip-slate-text); }
   .chip.red { background: var(--chip-red-bg); color: var(--red-text); }
+  /* tag micro-lift — hover-capable pointers only, so nothing sticks on touch */
+  .chip, .status { transition: transform var(--dur-fast) var(--ease-out); }
+  @media (hover: hover) {
+    .chip:hover, .status:hover { transform: translateY(-1px); }
+  }
   .kind { font-family: var(--mono); font-size: 0.68rem; color: var(--faint); }
   .tl-body p { margin: 0.15rem 0 0; font-size: 0.92rem; color: var(--mut); }
   .tl-body p strong { color: var(--ink); }
@@ -373,8 +406,11 @@
     font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.08em; cursor: pointer;
     background: rgba(255,255,255,0.06); color: #C9D2EA; border: 1px solid rgba(255,255,255,0.14);
     border-radius: 7px; padding: 0.25rem 0.6rem;
+    transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out),
+                transform var(--dur-fast) var(--ease-out);
   }
-  .copy:hover { background: rgba(255,255,255,0.12); }
+  .copy:hover:not(:disabled) { background: rgba(255,255,255,0.12); border-color: rgba(255,255,255,0.3); transform: translateY(-1px); }
+  .copy:active:not(:disabled) { transform: scale(0.97); }
 
   .acid {
     margin-top: 2rem; border: 1px solid var(--border); border-left: 4px solid var(--violet);
@@ -430,8 +466,18 @@
 
   /* ---------- reveal (JS-gated) ---------- */
   @media (prefers-reduced-motion: no-preference) {
-    .js .reveal { opacity: 0; transform: translateY(12px); transition: opacity 0.5s ease, transform 0.5s ease; }
+    .js .reveal { opacity: 0; transform: translateY(10px); transition: opacity var(--dur-in) var(--ease-out), transform var(--dur-in) var(--ease-out); }
     .js .reveal.in { opacity: 1; transform: none; }
+  }
+
+  /* every animation and transition on the page dies here — no exceptions */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      transition-delay: 0ms !important;
+    }
   }
 
   /* ---------- responsive ---------- */
@@ -528,7 +574,7 @@
             <div class="row"><dt>cve</dt><dd><a href="https://nvd.nist.gov/vuln/detail/CVE-2024-3094" target="_blank" rel="noopener noreferrer">CVE-2024-3094</a> &middot; CVSS 10.0</dd></div>
             <div class="row"><dt>reach</dt><dd>rolling &amp; pre-release channels only — Debian sid/testing, Fedora Rawhide, openSUSE Tumbleweed, Arch, Kali. <strong>No stable or LTS cut shipped it</strong> — <a href="#timeline">sources below</a>.</dd></div>
             <div class="row"><dt>planted</dt><dd>&asymp; Oct 2021 &rarr; Feb 2024 — 28 months</dd></div>
-            <div class="row"><dt>found</dt><dd class="late">2024-03-29 — five weeks after it shipped, via 500&nbsp;ms of SSH latency. Luck, not process.</dd></div>
+            <div class="row"><dt>found</dt><dd class="late">2024-03-29 — 34 days after it shipped, via 500&nbsp;ms of SSH latency. Luck, not process.</dd></div>
             <div class="row"><dt>in replay</dt><dd class="held">HELD at the 5.6.0 upload</dd></div>
           </dl>
         </div>
@@ -764,8 +810,8 @@
             <p>
               The decision comes from the years, not from this event's diff — a 90-day slice of this
               attack is three innocuous commits. And this is a <strong>ground-truth replay of a real
-              incident, not a benchmark</strong>: accuracy is measured separately, on held-out arcs the
-              playbook never saw. <a href="#ledger">See the honest ledger.</a>
+              incident, not a benchmark</strong> — accuracy belongs to a separate harness, over held-out
+              arcs the playbook never saw. <a href="#ledger">See the honest ledger.</a>
             </p>
             <p class="hold-meta">reproduce: <a href="#run"><code>npm run replay</code></a> &rarr; then <code>npm run explain -- --hold &lt;uuid&gt;</code></p>
           </div>
@@ -1312,10 +1358,10 @@ npm run schema && npm run seed && npm run calibrate && npm run replay">copy</but
       </p>
       <div class="ledger-grid">
         <div class="ledger-card reveal">
-          <h3>Why no number appears on this page</h3>
+          <h3>Why no accuracy number appears on this page</h3>
           <ul>
-            <li><strong>No accuracy figure exists, and this page cites none.</strong> Recall, hold recall and false-positive rate need real embeddings, and <code>npm run bench</code> refuses to compute them against the offline stand-in — a quality number derived from a hash function would be a property of the hash. Latency is a different question: it is a property of the vector index and the row count, not of the model, so <code>DEMO.md</code> now carries a p50/p95 measured on a local single-node cluster over a corpus of 8 searchable arcs, labelled as the floor it is rather than a scale result.</li>
-            <li><code>npm run bench</code> measures recall@k, hold recall, false-positive rate, precision and p50/p95 decision latency — <strong>only on held-out arcs</strong> the agent can never retrieve, against a lexical baseline, with the xz timeline excluded from every figure.</li>
+            <li><strong>No accuracy figure exists, and this page cites none.</strong> Recall, hold recall and false-positive rate need real embeddings, and <code>npm run bench</code> refuses to compute them against the offline stand-in — a quality number derived from a hash function would be a property of the hash. Latency is a different question: it is a property of the vector index and the row count, not of the model, so <code>DEMO.md</code> carries a p50/p95 measured on a local single-node cluster over a corpus of 8 searchable arcs, labelled as the floor it is rather than a scale result.</li>
+            <li><code>npm run bench</code> is built to measure recall@k, hold recall, false-positive rate, precision and p50/p95 decision latency — <strong>only on held-out arcs</strong> the agent can never retrieve, against a lexical baseline, with the xz timeline excluded from every figure.</li>
             <li>The xz replay is <strong>ground truth on a real incident</strong>: evidence the mechanic recognises the actual takeover. It is not a measurement and it feeds no metric.</li>
             <li>Thresholds are fitted by leave-one-out on the playbook split only, never on the evaluation set, and the fitted file is gitignored.</li>
           </ul>
@@ -1326,7 +1372,7 @@ npm run schema && npm run seed && npm run calibrate && npm run replay">copy</but
             <li><strong>266 tests</strong> — 221 pass on a bare clone, 45 skip until a live cluster is reachable.</li>
             <li>The hold is <strong>all-or-nothing under an explicit rollback test</strong>, and history reads are bounded by the assessment timestamp.</li>
             <li>A hold has <strong>a recorded way out</strong>: <code>commitUnhold</code> flips trust state, queues a retraction advisory and appends an audit row in one transaction, and the hold row itself is append-only.</li>
-            <li>Two SQL identities split <strong>setup versus runtime</strong>, provisioned by script and applied as real <code>GRANT</code>s: <code>sleeper_admin</code> (DDL and the destructive setup paths) and <code>gate_svc</code> (the running agent — <strong>no DELETE anywhere, no DDL, no playbook writes</strong>). With <code>--mcp-key</code>, a third identity is created for the audit surface: a read-only Cloud service account, which is not a SQL identity. An earlier <code>ingest_svc</code> was <strong>deleted rather than patched</strong> — it could not run the webhook it was named after.</li>
+            <li>Two SQL identities split <strong>setup versus runtime</strong>, provisioned by script and applied as real <code>GRANT</code>s: <code>sleeper_admin</code> (DDL and the destructive setup paths) and <code>gate_svc</code> (the running agent — <strong>no DELETE anywhere, no DDL, no playbook writes</strong>). That split is <strong>verified by execution, not by reading the grants</strong>: run against the live cluster, <code>gate_svc</code> is refused DELETE on every table, playbook INSERT, <code>SET CLUSTER SETTING</code> and <code>DROP TABLE</code> — every refusal <code>SQLSTATE 42501</code>, transcript in <code>DEMO.md</code>. With <code>--mcp-key</code>, a third identity is created for the audit surface: a read-only Cloud service account, which is not a SQL identity. An earlier <code>ingest_svc</code> was <strong>deleted rather than patched</strong> — it could not run the webhook it was named after.</li>
             <li>Managed MCP Server client: <strong>verified end to end against the live Cloud server</strong> — <code>npm run mcp:audit</code> drives all four tools against <code>cockroachlabs.cloud/mcp</code>, and <code>explain_query</code> returns <code>prefix spans: [/'xz-utils' - /'xz-utils']</code> computed server-side. The caveat that run produced: the credential is <strong>write-capable</strong>. No CockroachDB Cloud role grants MCP reads without writes, and <code>tools/list</code> is not role-filtered, so this path is read-only because the client only ever builds SELECT, EXPLAIN and SHOW — <strong>not because the server prevents anything</strong>. The enforced boundary is <code>gate_svc</code>, at the SQL layer.</li>
             <li>Lambda handlers: <strong>written and typechecked, not yet deployed.</strong> Nothing here is running in production.</li>
             <li>A decision with no benign neighbour to contrast against <strong>refuses to hold</strong> rather than passing on a similarity score alone.</li>
@@ -1368,7 +1414,7 @@ npm run schema && npm run seed && npm run calibrate && npm run replay">copy</but
             </tr>
             <tr>
               <td>Creativity &amp; Originality</td>
-              <td><strong>Retrieval is the actuator, not an answer</strong> — its output goes straight into the four-write transaction that blocks the release; nothing here terminates in a recommendation awaiting a human. And <strong>the agent enumerates its own suspects</strong> out of the package's memory rather than being handed the account to judge, which is precisely the state the world was in for the 2.5 years the real attack ran. <a href="#architecture">&sect; Architecture — stages 02 and 05</a></td>
+              <td><strong>Retrieval is the actuator, not an answer</strong> — its output goes straight into the four-write transaction that blocks the release; nothing here terminates in a recommendation awaiting a human. And <strong>the agent enumerates its own suspects</strong> out of the package's memory rather than being handed the account to judge, which is precisely the state the world was in for the 28 months the real attack ran. <a href="#architecture">&sect; Architecture — stages 02 and 05</a></td>
             </tr>
           </tbody>
         </table>
