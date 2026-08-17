@@ -25,7 +25,7 @@ so the memory layer *is* the product.**
 ![AWS Bedrock](https://img.shields.io/badge/AWS-Bedrock-FF9900?style=flat-square)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178C6?style=flat-square)
 ![Node](https://img.shields.io/badge/Node-%E2%89%A522-339933?style=flat-square)
-![Tests](https://img.shields.io/badge/tests-570_passing-22C55E?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-586_passing-22C55E?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 
 </div>
@@ -264,7 +264,7 @@ invariant is tested by killing a transaction mid-write and asserting nothing sur
 |---|---|
 | **Bedrock — Titan Text Embeddings V2** (`InvokeModel`) | Embeds every event on write and every arc summary before retrieval. 1024 dimensions, matching `VECTOR(1024)`. |
 | **Bedrock — Claude** (`Converse`) | Rolls a multi-year event history into one behavioural arc summary, then composes the hold rationale and the distro advisory. |
-| **Lambda** | Hosts the agent loop (`src/handler.ts`), webhook-triggered: one event arrives, is embedded, written, and assessed against everything already in memory. |
+| **Lambda** | Hosts the agent loop (`src/handler.ts`) behind a public Function URL, webhook-triggered: one event arrives, is embedded, written, and assessed against everything already in memory. `src/lambda.ts` is the entry adapter and owns the route policy — `POST /` and `POST /ingest` assess, `GET /health` is a liveness probe, and **`replayHandler` is deliberately not exposed**, because it resets and re-ingests the whole corpus and would be a public wipe button for the memory the demo depends on. Deployed by `scripts/deploy-aws.sh` (idempotent, `--dry-run` prints every call). |
 
 ## 📊 Engineering Rigor
 
@@ -365,9 +365,9 @@ Full setup, reproduction steps and benchmark methodology: **[DEMO.md](DEMO.md)**
 
 ## 🧪 Testing & CI
 
-**570 tests.** On a fresh clone with no database and no AWS account, `npm test` prints
-`504 passed | 66 skipped (570)` — that is the honest output, and it is the one you should expect.
-The 66 need a reachable cluster; point `DATABASE_URL` at one and it becomes `570 passed`.
+**586 tests.** On a fresh clone with no database and no AWS account, `npm test` prints
+`520 passed | 66 skipped (586)` — that is the honest output, and it is the one you should expect.
+The 66 need a reachable cluster; point `DATABASE_URL` at one and it becomes `586 passed`.
 
 The gate is reachability, not configuration: a `DATABASE_URL` that is set but does not answer skips
 those 39 and prints why, naming the host and the driver's error. A stale credential should not look
@@ -448,8 +448,12 @@ tarball diffing is described in the architecture but is not wired in this build.
 
 Known gaps, stated rather than buried:
 
-- **The Lambda is not deployed.** `src/handler.ts` is written, typechecked and unit-tested against
-  its own routing, but nothing has been pushed to AWS.
+- **The Lambda is not deployed yet.** The deploy path is complete and executable — `src/lambda.ts`
+  is the Function URL adapter, `scripts/deploy-aws.sh` provisions the role, bundles, ships and
+  returns a public URL, and `--dry-run` prints every AWS call it would make. The bundle builds
+  (368 KB) and its `handler` has been invoked locally against a real cluster across all of its
+  routes. What has not happened is the deploy itself: this project has no funded AWS account
+  attached yet. Nothing here claims a URL that does not answer.
 - **"Read-only at the protocol layer" was wrong, and is now stated correctly.** The first live run
   measured it: `tools/list` is *not* role-filtered — `create_database`, `create_table` and
   `insert_rows` are advertised to every identity, including one that cannot execute a single call —

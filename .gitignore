@@ -12,3 +12,9 @@ __pycache__/
 dist/
 coverage/
 .DS_Store
+
+# Deploy artifacts from scripts/deploy-aws.sh. The zip embeds data/, and the staging tree is
+# rebuilt from source on every run, so neither is worth versioning.
+.aws-build/
+function.zip
+.vercel/
