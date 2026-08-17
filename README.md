@@ -17,7 +17,7 @@ so the memory layer *is* the product.**
 
 <br />
 
-[**Demo**](#-getting-started) · [**Architecture**](#%EF%B8%8F-architecture--tech-stack) · [**Reproduce the numbers**](DEMO.md)
+[**Live site**](https://sleeper-nu.vercel.app) · [**Run it yourself**](#-getting-started) · [**Architecture**](#%EF%B8%8F-architecture--tech-stack) · [**Reproduce the numbers**](DEMO.md)
 
 <br />
 
@@ -25,7 +25,7 @@ so the memory layer *is* the product.**
 ![AWS Bedrock](https://img.shields.io/badge/AWS-Bedrock-FF9900?style=flat-square)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178C6?style=flat-square)
 ![Node](https://img.shields.io/badge/Node-%E2%89%A522-339933?style=flat-square)
-![Tests](https://img.shields.io/badge/tests-381_passing-22C55E?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-570_passing-22C55E?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 
 </div>
@@ -365,9 +365,9 @@ Full setup, reproduction steps and benchmark methodology: **[DEMO.md](DEMO.md)**
 
 ## 🧪 Testing & CI
 
-**381 tests.** On a fresh clone with no database and no AWS account, `npm test` prints
-`333 passed | 48 skipped (381)` — that is the honest output, and it is the one you should expect.
-The 48 need a reachable cluster; point `DATABASE_URL` at one and it becomes `381 passed`.
+**570 tests.** On a fresh clone with no database and no AWS account, `npm test` prints
+`504 passed | 66 skipped (570)` — that is the honest output, and it is the one you should expect.
+The 66 need a reachable cluster; point `DATABASE_URL` at one and it becomes `570 passed`.
 
 The gate is reachability, not configuration: a `DATABASE_URL` that is set but does not answer skips
 those 39 and prints why, naming the host and the driver's error. A stale credential should not look
