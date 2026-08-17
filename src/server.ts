@@ -1,5 +1,5 @@
 /**
- * The demo server.
+ * The demo server — bootstrap only.
  *
  *   npm start        # http://127.0.0.1:3000
  *
@@ -9,52 +9,31 @@
  * screen and no second scenario.
  *
  * The loop itself lives in src/agent.ts and is shared with `npm run replay` and the Lambda
- * handler — this file only transports it.
+ * handler; the routes live in src/routes.ts. This file only decides *whether to come up* and then
+ * transports: the corpus/model check, one `createServer`, one `listen`, the banner, and shutdown.
  *
  * Because there is no login, the server binds to loopback by default and the one destructive route
- * requires POST. See BIND_HOST and the `/api/replay` method check below — this is a demo surface,
- * not an authenticated API, and the boundary is the network, not a token.
+ * requires POST. See `resolveBindHost` here and the `/api/replay` method check in src/routes.ts —
+ * this is a demo surface, not an authenticated API, and the boundary is the network, not a token.
+ *
+ * Importable without booting. Everything below is an exported function over injected collaborators,
+ * and the only statement with a side effect is the entry-point guard at the bottom: `tsx
+ * src/server.ts` boots, `import './server.js'` does not. That is the standard dual-purpose-module
+ * idiom rather than a test flag — there is no branch here that behaves differently under test, and
+ * the boot the demo actually performs is still exercised for real by the child process that
+ * tests/server.test.ts spawns.
  */
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { createServer, type Server } from 'node:http'
+import { realpathSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { config } from './config.js'
-import { loadThresholds, loadTimeline, type CalibratedThresholds } from './corpus.js'
-import { FALLBACK_THRESHOLDS, type Thresholds } from './decide.js'
 import { OFFLINE, providerBanner } from './embeddings.js'
-import { runReplay, type Step } from './agent.js'
-import {
-  assertPlaybookModel,
-  auditReader,
-  explainScopedVia,
-  holdEvidence,
-  loadActorArc,
-} from './memory.js'
-import { assertUuid, resolveMcpMode, type SqlReader } from './mcp.js'
-import { closePool, query } from './db.js'
-import { createLogger, emit, newCorrId, recordFailure } from './log.js'
-
-const here = dirname(fileURLToPath(import.meta.url))
-const PUBLIC_DIR = join(here, '..', 'public')
-
-/**
- * Reported by `/api/health` so an operator can tell which build answered.
- *
- * Read from package.json rather than hardcoded — a version constant that has to be edited by hand
- * is a version constant that is wrong. Unreadable is not fatal: health is more useful degraded
- * than absent.
- */
-const VERSION = ((): string => {
-  try {
-    const pkg = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8')) as {
-      version?: string
-    }
-    return pkg.version ?? 'unknown'
-  } catch {
-    return 'unknown'
-  }
-})()
+import { assertPlaybookModel } from './memory.js'
+import { resolveMcpMode } from './mcp.js'
+import { closePool } from './db.js'
+import { emit, recordFailure } from './log.js'
+import { createRouter, VERSION, type Router } from './routes.js'
 
 /**
  * Loopback by default.
@@ -64,685 +43,36 @@ const VERSION = ((): string => {
  * because a container has to bind 0.0.0.0 to be reachable at all — but that is now a decision
  * someone makes, with an env var, rather than the default.
  */
-const BIND_HOST = process.env.SLEEPER_BIND_HOST ?? '127.0.0.1'
-
-/** One replay at a time: they all write to the same package's memory and would interleave. */
-let replayInFlight = false
-
-/**
- * The actor the last replay in this process actually assessed.
- *
- * `/api/explain` re-runs the prefix-scoped query using a stored arc's embedding, so it has to name
- * an actor — and now that the agent chooses the actor itself, the answer is whichever candidate
- * the last replay landed on, not a configured one. Null until a replay has run, which is exactly
- * the case the 404 below already covers.
- */
-let lastAssessedActor: string | null = null
-
-function json(
-  res: ServerResponse,
-  status: number,
-  body: unknown,
-  headers: Record<string, string> = {},
-): void {
-  const payload = JSON.stringify(body)
-  res.writeHead(status, {
-    'content-type': 'application/json',
-    'content-length': Buffer.byteLength(payload),
-    ...headers,
-  })
-  res.end(payload)
+export function resolveBindHost(env: NodeJS.ProcessEnv): string {
+  return env.SLEEPER_BIND_HOST ?? '127.0.0.1'
 }
 
 /**
- * How long one resolved audit reader is reused before the path is resolved again.
+ * What the terminal says on the way up.
  *
- * This used to be per request, and per request it dialled a third party. `auditReader()` →
- * `resolveSqlReader` opens a Streamable HTTP session to `https://cockroachlabs.cloud/mcp` and reads
- * `tools/list` before it can answer, so with COCKROACH_MCP_API_KEY set, `/api/state` — the call the
- * page makes on load, before anything has been clicked — measured 0.90–1.06 s against
- * `/api/health`'s 0.0015 s, and `/api/explain` 1.6 s idle. A page load's latency was a round trip
- * to somebody else's cloud, and the suite had already started timing out on it.
- *
- * 30 seconds, and the number follows from what the resolution is a function of. Two inputs:
- * process env (COCKROACH_MCP_API_KEY, COCKROACH_CLUSTER_ID, SLEEPER_MCP) — which cannot change
- * inside a running process at all — and whether cockroachlabs.cloud is reachable, which can. So the
- * TTL is only ever trading staleness about *reachability*:
- *
- *   - long enough that one page load (state + explain + a hold read) and a judge clicking around
- *     for a few seconds all share a single resolution, which is the whole point;
- *   - short enough that a transient MCP outage self-heals inside one demo beat rather than pinning
- *     the header to "direct SQL" for the rest of the process — 30 s is well under the time it takes
- *     to notice a wrong banner and re-run;
- *   - short enough that a shared MCP session is not being held open long enough for server-side
- *     idle expiry to be the realistic failure mode (and if it is one anyway, a failed call retires
- *     the session — see `releaseAuditSession`).
- *
- * Honest about the cost: `audit.via`/`audit.reason` are now up to 30 s stale with respect to MCP
- * reachability. They are never stale about which path *served this request* — that is read off the
- * reader that actually ran the statement, which is the property the UI header claims.
- *
- * SLEEPER_AUDIT_TTL_MS overrides it, and `0` restores the old resolve-per-request behaviour exactly
- * — which is how the fallback and recovery paths above were exercised without waiting 30 s for each
- * one. An unparseable value falls back to the default rather than to `NaN`, because every comparison
- * against `NaN` is false and the quiet result would be a cache that never hits.
+ * Returned as lines rather than printed, so the two conditional lines — the offline notice and the
+ * non-loopback warning — are assertable without binding a test to a public interface. The warning
+ * in particular is the one line here nobody wants to discover was silently dropped, and proving it
+ * appears for 0.0.0.0 must not require actually listening on 0.0.0.0.
  */
-const AUDIT_READER_TTL_MS = ((): number => {
-  const raw = Number(process.env.SLEEPER_AUDIT_TTL_MS ?? 30_000)
-  return Number.isFinite(raw) && raw >= 0 ? raw : 30_000
-})()
-
-/**
- * One resolved reader, shared by every request inside a TTL window.
- *
- * Lease-counted rather than closed on a timer. The MCP reader owns a live session, and a session
- * closed underneath a request that is mid-statement turns a cache into a new class of 500 — so a
- * superseded session is marked `retired` (no new leases) and closed by whichever request lets go of
- * it last.
- */
-type AuditSession = {
-  reader: SqlReader
-  /** Instant after which this session is no longer handed out. */
-  expiresAt: number
-  /** Requests currently holding it. */
-  leases: number
-  /** Superseded or invalidated: hand out no more leases, close at zero. */
-  retired: boolean
-  /** `close()` already called — the retire path can be reached twice. */
-  closing: boolean
-}
-
-let auditSession: AuditSession | null = null
-
-/**
- * The resolution in flight, if any, so a burst of requests arriving on a cold cache produces ONE
- * dial rather than one each. Cleared on both settle paths.
- */
-let auditResolving: Promise<AuditSession> | null = null
-
-/**
- * Hands out a lease on a resolved reader, resolving one if the cache is cold or expired.
- *
- * Nothing is cached on the failure path: if `auditReader()` rejects, `auditResolving` is cleared,
- * `auditSession` stays as it was (null, since an expired session is retired before this runs) and
- * the next request tries again. A *fallback* is not a rejection — `resolveSqlReader` answers a
- * failed MCP connect with a direct-SQL reader whose `reason` names the error — and that IS cached,
- * for the same TTL and no longer: reported as the direct path it is, never as MCP, and re-resolved
- * within 30 s so a transient outage cannot wedge the process into permanent fallback.
- */
-async function acquireAuditSession(): Promise<AuditSession> {
-  const live = auditSession
-  if (live && !live.retired && live.expiresAt > Date.now()) {
-    live.leases++
-    return live
+export function bootBannerLines(input: {
+  host: string
+  port: number
+  offline: boolean
+  provider: string
+}): string[] {
+  const lines = [`Sleeper demo on http://${input.host}:${input.port}`, input.provider]
+  if (input.offline) {
+    lines.push('OFFLINE MODE — deterministic stand-in for Bedrock. Wiring only, no quality claims.')
   }
-  // Expired or already invalidated: stop handing it out now, close it when its last reader is done.
-  if (live) retireAuditSession(live)
-
-  if (!auditResolving) {
-    auditResolving = auditReader()
-      .then((reader) => {
-        noteAuditPath(reader)
-        const session: AuditSession = {
-          reader,
-          expiresAt: Date.now() + AUDIT_READER_TTL_MS,
-          leases: 0,
-          retired: false,
-          closing: false,
-        }
-        auditSession = session
-        return session
-      })
-      .finally(() => {
-        auditResolving = null
-      })
-  }
-
-  const session = await auditResolving
-  session.leases++
-  return session
-}
-
-function retireAuditSession(session: AuditSession): void {
-  session.retired = true
-  if (auditSession === session) auditSession = null
-  closeIfIdle(session)
-}
-
-function closeIfIdle(session: AuditSession): void {
-  if (!session.retired || session.leases > 0 || session.closing) return
-  session.closing = true
-  // A reader that cannot be closed is not worth failing a request over — it is already off the
-  // cache and unreachable — but it is worth a line, because leaking MCP sessions is how a long
-  // demo run ends up rate-limited.
-  void session.reader.close().catch((err) => recordFailure('audit.reader_close_failed', err))
-}
-
-/**
- * `failed` is not bookkeeping: it is the recovery path.
- *
- * A shared reader is state, and the one thing that can go wrong with reusing it — an MCP session the
- * far end has since dropped — presents as a throw from the statement, not from the resolution. So a
- * request that failed while holding the session takes the session out of the cache on its way out,
- * and the next request resolves a fresh one. It does not retry in-band: a second dial inside the
- * same request is the cost this cache exists to remove, and one 500 is cheaper than reintroducing it
- * on every genuinely-bad statement.
- */
-function releaseAuditSession(session: AuditSession, failed: boolean): void {
-  session.leases--
-  if (failed) retireAuditSession(session)
-  else closeIfIdle(session)
-}
-
-/** A leased reader plus the calls THIS request made through it. */
-type LeasedReader = {
-  reader: SqlReader
-  /**
-   * The shared reader's `calls` log, sliced from where this request found it.
-   *
-   * Two honest limits. `tools/list` is pushed during connect, so it belongs to the session rather
-   * than to any one request and no longer appears here — `calls` is now "what this request ran",
-   * which is what the field claimed all along. And two genuinely concurrent audit reads over the
-   * same session will each see the other's calls in their slice; this is a single-page demo server
-   * where that does not arise, and the alternative is a per-request client, i.e. the defect.
-   */
-  calls: () => string[]
-}
-
-/**
- * Runs `use` against a leased reader, releasing it — and never closing the shared one — afterwards.
- */
-async function withAuditReader<T>(use: (leased: LeasedReader) => Promise<T>): Promise<T> {
-  const session = await acquireAuditSession()
-  const from = session.reader.calls.length
-  let failed = false
-  try {
-    return await use({
-      reader: session.reader,
-      calls: () => session.reader.calls.slice(from),
-    })
-  } catch (err) {
-    failed = true
-    throw err
-  } finally {
-    releaseAuditSession(session, failed)
-  }
-}
-
-/**
- * Resolves the audit read path and reports which one it is.
- *
- * Reads `via`/`reason` off the reader that is actually in force rather than off `resolveMcpMode`,
- * so a configured-but-unreachable MCP path still reports `direct` here — the cache changes when the
- * resolution happens, not what it is allowed to claim.
- */
-async function describeAuditPath(): Promise<{ via: 'mcp' | 'direct'; reason: string }> {
-  return withAuditReader(async ({ reader }) => ({
-    via: reader.via,
-    reason: withoutClusterId(reader.reason),
-  }))
-}
-
-/**
- * Logs `mcp.fallback` whenever the resolved audit path is NOT the Managed MCP Server.
- *
- * Warn when MCP was configured and we still ended up on direct SQL — that is a real fallback and
- * somebody should look at it. Info when no key was ever set, because on a clean checkout that is
- * the documented, expected path and warning about it would train the operator to ignore warnings.
- *
- * Called once per *resolution* rather than once per request, now that a resolution serves many
- * requests. That is also the more accurate framing — falling back is something that happened once,
- * at a known instant, and `ttlMs` says how long the decision stands before it is retried.
- */
-function noteAuditPath(reader: SqlReader): void {
-  if (reader.via === 'mcp') return
-  const configured = resolveMcpMode().via === 'mcp'
-  emit(configured ? 'warn' : 'info', 'mcp.fallback', {
-    configured,
-    reason: reader.reason,
-    ttlMs: AUDIT_READER_TTL_MS,
-  })
-}
-
-/**
- * Strips cluster UUIDs out of a string bound for an unauthenticated response.
- *
- * `resolveMcpMode`'s reason sentence names the pinned cluster — "session pinned to cluster
- * <uuid> via the mcp-cluster-id header" — and `/api/health` returned it verbatim, so the full
- * CockroachDB Cloud cluster id was readable by anything that could GET a health endpoint. Low
- * severity while the server is on loopback, but SLEEPER_BIND_HOST is a documented override and a
- * health endpoint is precisely the route people point a monitor at.
- *
- * Redacting the identifier rather than rewriting the sentence keeps the operator-useful half — that
- * the session IS pinned, and by which header — and keeps it useful if the sentence is ever reworded
- * upstream; `clusterPinned` carries the same fact in machine-readable form. A pattern match, not a
- * comparison against the configured id, so the id cannot escape through a *different* string (an
- * MCP error message quoting it, say) that happens to reach the same response.
- */
-function withoutClusterId(text: string): string {
-  return text.replace(
-    /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g,
-    '<redacted>',
-  )
-}
-
-/** `resolveMcpMode`, with the cluster id taken out — see `withoutClusterId`. */
-function publicMcpMode(): Record<string, unknown> {
-  const mode = resolveMcpMode()
-  if (mode.via === 'direct') return { via: mode.via, reason: withoutClusterId(mode.reason) }
-  return {
-    via: mode.via,
-    endpoint: mode.endpoint,
-    clusterPinned: mode.clusterPinned,
-    reason: withoutClusterId(mode.reason),
-  }
-}
-
-/**
- * Demo state for the header.
- *
- * Answers 200 even when the cluster is unreachable, with `degraded` naming the reason. It used to
- * throw, which surfaced as a bare 500 and a page that could only say "server unreachable" — the one
- * situation where the operator most needs the page to explain itself was the situation where it
- * explained nothing. The endpoint a monitor should page on is `/api/health`, which does return 503.
- */
-async function handleState(res: ServerResponse): Promise<void> {
-  const audit = await describeAuditPath()
-
-  let thresholds: Thresholds = FALLBACK_THRESHOLDS
-  let calibrated: CalibratedThresholds | null = null
-  let degraded: string | null = null
-  try {
-    const loaded = loadThresholds()
-    thresholds = loaded.thresholds
-    calibrated = loaded.calibrated
-  } catch (err) {
-    degraded = 'thresholds_unreadable'
-    recordFailure('state.thresholds_unreadable', err)
-  }
-
-  const counts = { events: 0, arcs: 0, playbook: 0, heldOut: 0 }
-  let trustStatus: string | null = null
-  let latestHold: { id: string; releaseVersion: string; createdAt: Date } | null = null
-  let dbReachable = true
-
-  try {
-    const [events, arcs, playbook, holds, trust] = await Promise.all([
-      /**
-       * Scoped to the configured package, and not only for the plan.
-       *
-       * `SELECT count(*) FROM events` is a FULL SCAN — EXPLAIN says
-       * `table: events@events_event_key_idx, spans: FULL SCAN` — and it was also answering the wrong
-       * question. Everything else on this panel is this package's (`latestHold`, `trustStatus`), the
-       * label above the number reads "events in memory", and on any cluster that has ever run a test
-       * or a second package the global count is larger than the memory the demo is about: 50 rows
-       * here for a package holding 25.
-       *
-       * With the predicate the planner takes a bounded prefix span off one of the two
-       * package-leading indexes (`events_pkg_actor_time_idx` here, `events_pkg_time_idx` equally
-       * eligible — either is a span, not a scan). Still a count, so it is O(rows in the package);
-       * this buys the right answer and the right span, not a constant-time counter.
-       */
-      query<{ n: string }>('SELECT count(*) AS n FROM events WHERE package_id = $1', [
-        config.packageId,
-      ]),
-      // Same argument, same shape: served by the `(package_id, actor_id)` unique index.
-      query<{ n: string }>('SELECT count(*) AS n FROM actor_arcs WHERE package_id = $1', [
-        config.packageId,
-      ]),
-      /**
-       * This one stays unfiltered, deliberately.
-       *
-       * The playbook is the CROSS-package corpus of known takeovers — the whole point is that it
-       * describes packages other than the one being assessed, so `WHERE package_id = $1` would
-       * return zero and the header would report an empty corpus for a demo that just matched against
-       * it. It is a FULL SCAN and will stay one: it is the seeded corpus, bounded at tens of rows
-       * (16 on this cluster), and the only predicate that could bound it further is `held_out`, which
-       * is the column being grouped BY. CockroachDB's own index recommendation here is an index on
-       * `held_out` — a two-value column over 16 rows, which is not a fix, it is a slower plan with
-       * more moving parts.
-       */
-      query<{ n: string; held_out: boolean }>(
-        'SELECT held_out, count(*) AS n FROM takeover_playbook GROUP BY held_out',
-      ),
-      query<{ id: string; release_version: string; created_at: Date }>(
-        `SELECT id, release_version, created_at FROM release_hold
-         WHERE package_id = $1 ORDER BY created_at DESC LIMIT 1`,
-        [config.packageId],
-      ),
-      query<{ status: string }>('SELECT status FROM trust_state WHERE package_id = $1', [
-        config.packageId,
-      ]),
-    ])
-
-    counts.events = Number(events.rows[0]?.n ?? 0)
-    counts.arcs = Number(arcs.rows[0]?.n ?? 0)
-    counts.playbook = Number(playbook.rows.find((r) => !r.held_out)?.n ?? 0)
-    counts.heldOut = Number(playbook.rows.find((r) => r.held_out)?.n ?? 0)
-    trustStatus = trust.rows[0]?.status ?? null
-    latestHold = holds.rows[0]
-      ? {
-          id: holds.rows[0].id,
-          releaseVersion: holds.rows[0].release_version,
-          createdAt: holds.rows[0].created_at,
-        }
-      : null
-  } catch (err) {
-    dbReachable = false
-    degraded = degraded ?? 'db_unreachable'
-    recordFailure('state.db_unreachable', err)
-  }
-
-  json(res, 200, {
-    packageId: config.packageId,
-    provider: providerBanner(),
-    offline: OFFLINE,
-    thresholds,
-    calibrated,
-    counts,
-    trustStatus,
-    latestHold,
-    /** Which path served the audit reads, and why — shown in the UI header. */
-    audit,
-    dbReachable,
-    degraded,
-  })
-}
-
-/**
- * The health endpoint.
- *
- * 503 for the two conditions that make a decision impossible or untrustworthy: the cluster is
- * unreachable (there is no memory to decide on) and thresholds.json is unreadable (the cut points
- * the decision uses cannot be established). A `fallback` threshold set is NOT degraded — it is a
- * documented mode, reported so it is never mistaken for a fitted one.
- *
- * `mcp` reports the CONFIGURED resolution, not a live probe. Dialling the Managed MCP Server on
- * every health check would turn a monitor into a load generator against a third-party service; the
- * live answer is in `/api/state`, which resolves it for real (at most once per TTL window — see
- * AUDIT_READER_TTL_MS).
- *
- * It reports it through `publicMcpMode` rather than verbatim: this route is unauthenticated and is
- * the one an operator exposes on purpose, so the cluster identifier does not go in it.
- */
-async function handleHealth(res: ServerResponse): Promise<void> {
-  const started = Date.now()
-  let reachable = false
-  let latencyMs: number | null = null
-  try {
-    await query('SELECT 1')
-    reachable = true
-    latencyMs = Date.now() - started
-  } catch (err) {
-    recordFailure('health.db_unreachable', err)
-  }
-
-  let thresholds: 'fitted' | 'fallback' | 'unreadable'
-  try {
-    thresholds = loadThresholds().calibrated ? 'fitted' : 'fallback'
-  } catch (err) {
-    thresholds = 'unreadable'
-    recordFailure('health.thresholds_unreadable', err)
-  }
-
-  const ok = reachable && thresholds !== 'unreadable'
-  json(res, ok ? 200 : 503, {
-    status: ok ? 'ok' : 'degraded',
-    db: { reachable, latencyMs },
-    inference: OFFLINE ? 'offline' : 'bedrock',
-    mcp: publicMcpMode(),
-    thresholds,
-    version: VERSION,
-  })
-}
-
-async function handleReplay(res: ServerResponse, corrId: string): Promise<void> {
-  if (replayInFlight) {
-    json(res, 409, { error: 'replay_in_flight', message: 'A replay is already running. Wait for it to finish.' })
-    return
-  }
-  replayInFlight = true
-
-  res.writeHead(200, {
-    'content-type': 'text/event-stream',
-    'cache-control': 'no-cache',
-    connection: 'keep-alive',
-    'x-accel-buffering': 'no',
-  })
-
-  const send = (event: string, data: unknown): void => {
-    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
-  }
-
-  try {
-    const timeline = loadTimeline(config.packageId)
-    const { thresholds, calibrated } = loadThresholds()
-
-    send('start', {
-      packageId: timeline.packageId,
-      total: timeline.events.length,
-      actors: timeline.actors,
-      provider: providerBanner(),
-      offline: OFFLINE,
-      thresholds,
-      calibrated: Boolean(calibrated),
-      // Surfaced to the browser so a screenshot of a failed run carries the id needed to find the
-      // matching log lines.
-      corrId,
-    })
-
-    const summary = await runReplay(
-      {
-        packageId: timeline.packageId,
-        // Unset unless SUSPECT_ACTOR pins it: the demo does not tell the agent whom to suspect.
-        suspectActor: config.suspectActorOverride,
-        maxCandidates: config.maxCandidates,
-        windowDays: config.arcWindowDays,
-        thresholds,
-        events: timeline.events,
-        corrId,
-      },
-      (step: Step) => {
-        send(step.type, step)
-      },
+  if (input.host !== '127.0.0.1' && input.host !== 'localhost') {
+    lines.push(
+      `WARNING: bound to ${input.host}, not loopback. /api/replay resets this package's memory and ` +
+        'there is no authentication on this server.',
     )
-
-    lastAssessedActor = summary.assessedActor
-    send('summary', summary)
-  } catch (err) {
-    // The stream is already open, so an error has to travel as an event rather than a status code.
-    // Same rule as everywhere else: the detail goes to the log, a reference goes to the client.
-    const ref = recordFailure('replay.failed', err, { corrId })
-    send('failed', { error: 'replay_failed', ref, corrId })
-  } finally {
-    replayInFlight = false
-    res.end()
   }
+  return lines
 }
-
-/**
- * "Explain the retrieval" — routed through the resolved audit path.
- *
- * This used to call `explainScoped`, which goes straight to the pg pool, so the browser demo — the
- * surface the video records — could not exercise the Managed MCP Server at all no matter how it was
- * configured. `explainScopedVia` runs the same statement through whichever reader `auditReader`
- * resolved, and the response names it, so what the demo shows is the path that actually served it.
- */
-async function handleExplain(res: ServerResponse, corrId: string): Promise<void> {
-  // The actor this replay chose, if one has run; otherwise the inspection fallback, which only
-  // matters on a cluster warmed by some earlier process.
-  const actorId = lastAssessedActor ?? config.suspectActor
-  const arc = await loadActorArc(config.packageId, actorId)
-  if (!arc) {
-    json(res, 404, { error: 'no_actor_arc', message: 'No actor arc yet — run a replay first.' })
-    return
-  }
-  await withAuditReader(async ({ reader, calls }) => {
-    const started = Date.now()
-    const explain = await explainScopedVia(reader, config.packageId, arc.embedding)
-    createLogger({ corrId, packageId: config.packageId }).info('retrieval.explained', {
-      actorId,
-      prefixScoped: explain.prefixScoped,
-      usedVectorIndex: explain.usedVectorIndex,
-      via: reader.via,
-      durMs: Date.now() - started,
-    })
-    json(res, 200, {
-      ...explain,
-      // Named in the response because the arc being explained is now the agent's own choice.
-      actorId,
-      audit: { via: reader.via, reason: withoutClusterId(reader.reason), calls: calls() },
-    })
-  })
-}
-
-async function handleHold(res: ServerResponse, holdId: string, corrId: string): Promise<void> {
-  await withAuditReader(async ({ reader, calls }) => {
-    const evidence = await holdEvidence(holdId, reader)
-    if (!evidence) {
-      json(res, 404, { error: 'no_such_hold', message: `No release_hold with id ${holdId}` })
-      return
-    }
-    createLogger({ corrId }).info('audit.read', {
-      holdId,
-      via: reader.via,
-      calls: calls().length,
-      auditTrailRows: evidence.auditTrail.length,
-    })
-    json(res, 200, {
-      ...evidence,
-      audit: { via: reader.via, reason: withoutClusterId(reader.reason), calls: calls() },
-    })
-  })
-}
-
-function serveStatic(res: ServerResponse, file: string, type: string): void {
-  try {
-    const body = readFileSync(join(PUBLIC_DIR, file))
-    res.writeHead(200, { 'content-type': type, 'content-length': body.length })
-    res.end(body)
-  } catch {
-    res.writeHead(404, { 'content-type': 'text/plain' })
-    res.end('not found')
-  }
-}
-
-/**
- * Defence in depth on top of the POST requirement.
- *
- * POST alone stops a prefetch or an `<img src>` from wiping the demo, but it does not stop a
- * cross-origin `<form method=post>` on a page the operator happens to be visiting. Browsers label
- * that request `Sec-Fetch-Site: cross-site`; same-origin fetches say `same-origin` and address-bar
- * navigations say `none`. A client that sends no such header (curl, the test suite) is allowed
- * through — this is not authentication, and the real boundary remains the loopback bind.
- */
-function isCrossSite(req: IncomingMessage): boolean {
-  const site = req.headers['sec-fetch-site']
-  return typeof site === 'string' && site !== 'same-origin' && site !== 'none'
-}
-
-const server = createServer((req: IncomingMessage, res: ServerResponse) => {
-  const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
-  const route = url.pathname
-  const method = req.method ?? 'GET'
-  const corrId = newCorrId()
-  const started = Date.now()
-
-  const run = async (): Promise<void> => {
-    if (route === '/' || route === '/index.html') return serveStatic(res, 'index.html', 'text/html; charset=utf-8')
-    if (route === '/app.css') return serveStatic(res, 'app.css', 'text/css; charset=utf-8')
-    if (route === '/app.js') return serveStatic(res, 'app.js', 'text/javascript; charset=utf-8')
-    if (route === '/icon.svg') return serveStatic(res, 'icon.svg', 'image/svg+xml')
-    if (route === '/api/health') return handleHealth(res)
-    if (route === '/api/state') return handleState(res)
-
-    if (route === '/api/replay') {
-      /**
-       * POST only, and this is not pedantry about verbs.
-       *
-       * `runReplay` starts with `resetPackage`, which DELETEs every event, arc, hold, advisory and
-       * audit row for the package. As a GET that made the demo's entire memory deletable by any
-       * link prefetcher, any `<img src="…/api/replay">` on any page, any URL scanner and any
-       * browser that decided to speculatively load a bookmark — mid-recording.
-       */
-      if (method !== 'POST') {
-        json(
-          res,
-          405,
-          {
-            error: 'method_not_allowed',
-            message: 'POST /api/replay — it resets this package\'s memory before replaying.',
-          },
-          { allow: 'POST' },
-        )
-        return
-      }
-      if (isCrossSite(req)) {
-        json(res, 403, { error: 'cross_site_forbidden' })
-        return
-      }
-      return handleReplay(res, corrId)
-    }
-
-    if (route === '/api/explain') return handleExplain(res, corrId)
-    if (route.startsWith('/api/hold/')) {
-      /**
-       * A malformed hold id is the caller's mistake, so it answers 400 — it used to answer 500.
-       *
-       * Two throws reached the catch-all below: `decodeURIComponent` raises URIError on a truncated
-       * escape (`/api/hold/%E0%A4%A`), and `assertUuid`, called deep inside the audit read, raises
-       * on anything that is not a UUID. Both came back as `internal_error` with an error-level line
-       * and a stack — a page-worthy server fault reported for something no server-side change can
-       * fix, inflating exactly the rate a monitor alerts on. src/handler.ts already draws this line
-       * with BadRequestError; this is the same line, drawn on the demo surface.
-       *
-       * Validated here rather than with a local regex so there is still one definition of "is a
-       * UUID" — `assertUuid` also stays where it is, guarding the SQL interpolation itself.
-       * A well-formed id that simply does not exist is NOT this case: it still 404s below.
-       */
-      let holdId: string
-      try {
-        holdId = assertUuid(decodeURIComponent(route.slice('/api/hold/'.length)))
-      } catch (err) {
-        // warn, not error: nothing here is broken. And the message stays out of the response —
-        // `assertUuid` echoes the caller's input back inside it, which is useful in a log and is
-        // the one thing this server never puts on the wire.
-        emit('warn', 'hold.invalid_id', {
-          corrId,
-          route,
-          reason: err instanceof URIError ? 'malformed_escape' : 'not_a_uuid',
-        })
-        json(res, 400, { error: 'invalid_hold_id', corrId })
-        return
-      }
-      return handleHold(res, holdId, corrId)
-    }
-    json(res, 404, { error: 'not_found' })
-  }
-
-  run()
-    .catch((err) => {
-      /**
-       * The one rule: `err.message` never crosses the wire.
-       *
-       * A pg failure message carries the cluster hostname, its IP, the port and the SQL user;
-       * `assertUuid` echoes back whatever the caller sent. `recordFailure` puts the whole thing —
-       * message and stack — in the log and hands back a reference the caller can quote.
-       */
-      const ref = recordFailure('request.failed', err, { corrId, route, method })
-      if (!res.headersSent) json(res, 500, { error: 'internal_error', ref, corrId })
-      else res.end()
-    })
-    .finally(() => {
-      emit('info', 'http.request', {
-        corrId,
-        method,
-        route,
-        status: res.statusCode,
-        durMs: Date.now() - started,
-      })
-    })
-})
 
 /**
  * The corpus/model check, run once at boot instead of at the moment a decision is due.
@@ -754,61 +84,146 @@ const server = createServer((req: IncomingMessage, res: ServerResponse) => {
  * operator instruction (re-seed, or point the process back at the model that wrote the corpus), so
  * a boot that dies printing it is worth more than a server that comes up unable to decide.
  *
- * Top-level await rather than the `listen` callback, which is synchronous and cannot await it.
+ * A cluster that could not answer the query is not the same as a check that said no, and it does
+ * not stop the boot. Unreachable-at-startup — or a table being recreated by a migration at that
+ * instant — is exactly what `/api/health` exists to report as 503 and what `/api/state` degrades
+ * for, and neither can report anything from a process that refused to listen.
+ *
+ * Discriminated on the message because there is no error class to test: memory.ts throws a plain
+ * `Error`. If that message is ever reworded this stops being fatal at boot, which is the safe
+ * direction to fail — the same check still runs on the empty-match path before any decision.
  *
  * Honest about the limit: this only fires when a corpus embedded by a DIFFERENT model exists. An
  * empty playbook passes silently, by design — so it is not a "did you run `npm run seed`?" check
  * and an untouched cluster will sail through it.
  */
-try {
-  await assertPlaybookModel()
-} catch (err) {
-  /**
-   * A cluster that could not answer the query is not the same as a check that said no, and it does
-   * not stop the boot. Unreachable-at-startup — or a table being recreated by a migration at that
-   * instant — is exactly what `/api/health` exists to report as 503 and what `/api/state` degrades
-   * for, and neither can report anything from a process that refused to listen.
-   *
-   * Discriminated on the message because there is no error class to test: memory.ts throws a plain
-   * `Error`. If that message is ever reworded this stops being fatal at boot, which is the safe
-   * direction to fail — the same check still runs on the empty-match path before any decision.
-   */
-  if (err instanceof Error && /embedding model mismatch/i.test(err.message)) throw err
-  recordFailure('startup.playbook_model_uncheckable', err)
+export async function checkPlaybookModel(assert: () => Promise<void>): Promise<void> {
+  try {
+    await assert()
+  } catch (err) {
+    if (err instanceof Error && /embedding model mismatch/i.test(err.message)) throw err
+    recordFailure('startup.playbook_model_uncheckable', err)
+  }
 }
 
-server.listen(config.port, BIND_HOST, () => {
-  // stdout stays human: this banner is what a judge sees in the terminal during a recording. The
-  // machine-readable stream is stderr — see src/log.ts.
-  console.log(`Sleeper demo on http://${BIND_HOST}:${config.port}`)
-  console.log(providerBanner())
-  if (OFFLINE) {
-    console.log('OFFLINE MODE — deterministic stand-in for Bedrock. Wiring only, no quality claims.')
+/**
+ * Is this module the process entry point?
+ *
+ * Compares real paths rather than URL strings: `tsx` normalises `argv[1]` to an absolute path but
+ * not necessarily through the same symlinks as the resolved module URL (`/tmp` vs `/private/tmp` on
+ * macOS is the everyday case), and a mismatch here would mean `npm start` silently not starting.
+ * A path that cannot be resolved at all is not the entry point — nothing was started, so nothing is
+ * broken by saying no.
+ */
+export function isEntryPoint(moduleUrl: string, argv1: string | undefined): boolean {
+  if (!argv1) return false
+  try {
+    return realpathSync(fileURLToPath(moduleUrl)) === realpathSync(resolve(argv1))
+  } catch {
+    return false
   }
-  if (BIND_HOST !== '127.0.0.1' && BIND_HOST !== 'localhost') {
-    console.log(
-      `WARNING: bound to ${BIND_HOST}, not loopback. /api/replay resets this package's memory and ` +
-        'there is no authentication on this server.',
-    )
-  }
-  emit('info', 'server.listening', {
-    host: BIND_HOST,
-    port: config.port,
-    version: VERSION,
-    inference: OFFLINE ? 'offline' : 'bedrock',
-    mcp: resolveMcpMode().via,
-  })
-})
+}
 
-for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-  process.on(signal, () => {
-    // The cached reader outlives a request now, so shutdown is the one place that has to let go of
-    // it. `retireAuditSession` closes it once its last lease is released, so an in-flight audit read
-    // finishes rather than losing its session on the way out; `server.close` is already waiting for
-    // that request anyway.
-    if (auditSession) retireAuditSession(auditSession)
+export type BootDeps = {
+  router: Router
+  host: string
+  port: number
+  offline: boolean
+  providerBanner: () => string
+  version: string
+  assertPlaybookModel: () => Promise<void>
+  closePool: () => Promise<void>
+  /** Human-readable banner sink. stdout in production — see the comment in `boot`. */
+  log: (line: string) => void
+  /** `process.exit` in production; a spy under test, which is the only way to reach the last line. */
+  exit: (code: number) => void
+  /** Registers a shutdown signal handler. Injected so a test does not install one in the runner. */
+  onSignal: (signal: NodeJS.Signals, handler: () => void) => void
+}
+
+export type BootedServer = {
+  server: Server
+  /** Idempotent enough for a signal handler: `server.close` on an already-closing server is a no-op. */
+  shutdown: () => void
+}
+
+/** Production wiring — the one place the real collaborators are named. */
+export function productionBootDeps(): BootDeps {
+  return {
+    router: createRouter(),
+    host: resolveBindHost(process.env),
+    port: config.port,
+    offline: OFFLINE,
+    providerBanner,
+    version: VERSION,
+    assertPlaybookModel,
+    closePool,
+    log: console.log,
+    exit: process.exit,
+    onSignal: (signal, handler) => {
+      process.on(signal, handler)
+    },
+  }
+}
+
+/**
+ * Runs the boot check, starts listening, and wires shutdown. Resolves once the socket is bound.
+ *
+ * The check runs BEFORE `listen`, deliberately: a process that cannot decide should not be
+ * answering `/api/health` with `ok` while it fails every assessment.
+ */
+export async function boot(deps: BootDeps): Promise<BootedServer> {
+  await checkPlaybookModel(deps.assertPlaybookModel)
+
+  const server = createServer(deps.router.handle)
+
+  const shutdown = (): void => {
+    deps.router.shutdown()
     server.close(() => {
-      void closePool().finally(() => process.exit(0))
+      void deps.closePool().finally(() => deps.exit(0))
+    })
+  }
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) deps.onSignal(signal, shutdown)
+
+  await new Promise<void>((settle) => {
+    server.listen(deps.port, deps.host, () => {
+      // stdout stays human: this banner is what a judge sees in the terminal during a recording. The
+      // machine-readable stream is stderr — see src/log.ts.
+      for (const line of bootBannerLines({
+        host: deps.host,
+        port: deps.port,
+        offline: deps.offline,
+        provider: deps.providerBanner(),
+      })) {
+        deps.log(line)
+      }
+      emit('info', 'server.listening', {
+        host: deps.host,
+        port: deps.port,
+        version: deps.version,
+        inference: deps.offline ? 'offline' : 'bedrock',
+        mcp: resolveMcpMode().via,
+      })
+      settle()
     })
   })
+
+  return { server, shutdown }
+}
+
+/**
+ * The one side effect in this file, and the reason the rest of it is measurable.
+ *
+ * Unreachable from the test runner by construction, not by a flag: the condition is true exactly
+ * when this module IS the process entry (`tsx src/server.ts`, `npm start`), and under vitest
+ * `argv[1]` is the runner. Nothing is stubbed and nothing behaves differently — the boot the demo
+ * performs is the boot the child process in tests/server.test.ts performs, which is what proves
+ * `/api/replay` is unreachable by GET and that the bind is loopback-only. The three pieces this
+ * line is made of are each covered directly: `isEntryPoint` (both answers and the unresolvable
+ * path), `productionBootDeps` (every field, including the signal registration), and `boot` (a real
+ * listener on an ephemeral port, banner, and shutdown through to `exit`).
+ */
+/* v8 ignore next 3 -- entry-point invocation; justified immediately above: true only when this file is the process entry, never under vitest. */
+if (isEntryPoint(import.meta.url, process.argv[1])) {
+  await boot(productionBootDeps())
 }

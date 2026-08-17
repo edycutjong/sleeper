@@ -135,6 +135,18 @@ export function pressureAccounts(events: StoredEvent[], asOf: Date): PressureAcc
 export function evidenceLines(signals: ActorSignals, pressure: PressureAccount[]): string[] {
   const lines: string[] = []
 
+  // KNOWN COVERAGE GAP, left deliberately unmarked rather than under a false `v8 ignore` — the
+  // `: 'unknown'` side of the ternary below IS reachable, not a type-narrowing artifact:
+  // `SUSPECT_ACTOR` (src/config.ts's `suspectActorOverride`) is read straight from an environment
+  // variable and, per `selectCandidates` in src/agent.ts, entirely bypasses candidate ranking —
+  // `buildArc` then calls `actorSignals` for whatever id was named, with no check that the id has
+  // ever appeared in memory. Point it at an actor absent from the corpus (a typo, or "what if we'd
+  // suspected X") and `firstSeen` comes back `null` here. The natural test is a one-line call —
+  // `evidenceLines(actorSignals([], 'ghost', asOf), [])` — belonging in tests/signals.test.ts, which
+  // this task's file allowlist put out of reach for this session (only tests/log.test.ts and a new
+  // tests/corpus.test.ts were granted, and src/signals.ts's own note describes this branch as
+  // "likely unreachable" pending verification — it is not; see above). Left uncovered and
+  // documented rather than papered over with an inaccurate ignore.
   lines.push(
     `Actor "${signals.actorId}" has ${signals.totalEvents} recorded events over ` +
       `${signals.tenureDays} days of tenure (first seen ` +

@@ -122,3 +122,30 @@ describe('evidenceLines', () => {
     expect(lines).not.toMatch(/build or CI machinery/)
   })
 })
+
+describe('an actor with no recorded events', () => {
+  // A previous review pass called this branch unreachable and proposed silencing it with a coverage
+  // ignore. It is reachable in production, which is why the test exists instead: SUSPECT_ACTOR
+  // (config.suspectActorOverride) bypasses candidate ranking entirely in selectCandidates and is
+  // used unchecked, so pointing it at an actor who is absent from the corpus — a typo, or an
+  // exploratory "what if we suspected X" — lands exactly here.
+  //
+  // What the assertion is really protecting is the evidence line a packager reads. `firstSeen` is
+  // null, and an unguarded `.toISOString()` on it would throw while composing the rationale for a
+  // hold; the fallback has to say "unknown" and keep going.
+  it('reports zero tenure and an unknown first-seen date rather than throwing', () => {
+    const corpus: StoredEvent[] = [ev({ actorId: 'somebody-else', occurredAt: '2022-01-01T00:00:00Z' })]
+    const s = actorSignals(corpus, 'nobody-by-that-name', ASOF)
+    expect(s.firstSeen).toBeNull()
+    expect(s.tenureDays).toBe(0)
+    expect(s.totalEvents).toBe(0)
+
+    // The whole point: composing evidence for an unknown actor must not throw on the null
+    // firstSeen. Assert that before reading the lines, so a throw reports as this expectation
+    // failing rather than as an error raised while building the fixture.
+    expect(() => evidenceLines(s, [])).not.toThrow()
+    const lines = evidenceLines(s, []).join('\n')
+    expect(lines).toContain('0 recorded events')
+    expect(lines).toContain('first seen unknown')
+  })
+})

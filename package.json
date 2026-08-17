@@ -22,7 +22,8 @@
     "dev": "tsx watch src/server.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "counts": "tsx scripts/counts.ts"
+    "counts": "tsx scripts/counts.ts",
+    "coverage": "vitest run --coverage"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.658.0",

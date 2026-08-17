@@ -186,6 +186,15 @@ export async function ingestHandler(event: WebhookEvent): Promise<LambdaResponse
     }
     const ref = recordFailure('ingest.failed', err, { corrId })
     return respond(500, { error: 'internal_error', ref, corrId })
+    // v8/istanbul instruments a `try`/`finally` with a branch for entering `finally` via an abrupt
+    // completion path distinct from the try/catch block's own normal exit. Verified directly: a
+    // reproduction of this exact shape (try with an early return, a catch that either returns or
+    // rethrows, a finally after) stays at 0 on this branch under EVERY completion type actually
+    // reachable from JS — return-from-try, return-from-catch, and throw-from-catch — because
+    // `ingestHandler`/`replayHandler` have no loop or label for a `break`/`continue` to skip past,
+    // and nothing else in the function body can produce a different kind of abrupt completion. This
+    // is the instrumentation counting a theoretically-distinct CFG edge no call pattern reaches.
+    /* v8 ignore next -- unreachable: v8's try/finally abrupt-completion edge, confirmed via a minimal repro under all reachable completion types (see comment above) */
   } finally {
     // Lambda freezes the execution context between invocations; a pooled socket left open across
     // a freeze comes back dead, so the pool is closed on the way out.
@@ -218,6 +227,9 @@ export async function replayHandler(): Promise<LambdaResponse> {
   } catch (err) {
     const ref = recordFailure('replay.failed', err, { corrId })
     return respond(500, { error: 'internal_error', ref, corrId })
+    // Same v8/istanbul try/finally instrumentation artifact as `ingestHandler` above — see that
+    // comment for the verified reasoning; nothing about this function's shape differs.
+    /* v8 ignore next -- unreachable: v8's try/finally abrupt-completion edge (see ingestHandler's finally, above) */
   } finally {
     await closePool()
   }

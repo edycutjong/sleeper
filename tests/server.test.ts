@@ -1,31 +1,50 @@
 /**
- * HTTP surface and Lambda-handler tests.
+ * The boot, the Lambda handler, and the two properties only a real listener can establish.
  *
- * The server is started as a real child process against a real cluster rather than by importing
- * `src/server.ts` — that module starts listening as a side effect of import, so there is no way to
- * exercise it in-process without either refactoring the demo entry point into a factory or leaking
- * a listener into the test runner. Booting it is also what actually proves the two things this file
- * is here for: that `/api/replay` really is unreachable by GET, and that the process really does
- * bind loopback only.
+ * The routes themselves are no longer here. They live in src/routes.ts behind `createRouter` and
+ * are unit-tested in tests/routes.test.ts with a fake `req`/`res` — the change that earned that was
+ * to src/, not to a test: `src/server.ts` used to be 800 lines of route logic in a module that
+ * started listening as a side effect of import, so the only way to exercise any of it was through a
+ * socket, and v8 cannot instrument a child process. Everything that could be a function call is one
+ * now.
  *
- * The price, stated plainly because a coverage report will otherwise state it as an accusation: v8
- * cannot instrument a child process, so `src/server.ts` measures 0% covered while every route in it
- * is exercised here against a live cluster. That is a limitation of the measurement, not a gap in
- * the tests, and it was NOT fixed by making the module importable — the two things that happen on
- * import are a database-dependent boot check and `server.listen`, and gating either on a test-only
- * flag would mean the judge-facing entry point boots one way for tests and another way for the demo,
- * in exchange for a number. The shape that would earn the coverage honestly is the handlers living
- * in their own module with this file reduced to a bootstrap; that is a change to src/, not to a
- * test, and it belongs in a change that is about the architecture rather than about the metric.
+ * What stayed, because nothing else can establish it:
  *
- * Skipped without DATABASE_URL, like tests/integration.test.ts, so a clean checkout stays green.
+ *   - **GET /api/replay is unreachable.** A unit test can assert that the dispatcher answers 405,
+ *     and tests/routes.test.ts does. Only a real listener can show that a GET arriving over TCP
+ *     reaches that dispatcher rather than some earlier layer that answered it first, and that what
+ *     comes back is a JSON body rather than an event stream — i.e. that nothing was reset.
+ *   - **The process binds loopback only.** That is a property of `listen`, an address and a kernel.
+ *     There is no in-process assertion of it; you have to try to connect from somewhere else.
+ *
+ * Both are asserted against a child process started exactly the way `npm start` starts it, which
+ * also covers the entry-point guard at the bottom of src/server.ts and the real boot path through
+ * it. The bootstrap's own logic — bind host, banner, the corpus/model check, shutdown — is a set of
+ * exported functions, tested in process at the bottom of this file.
+ *
+ * The child-process describes are skipped without DATABASE_URL, like tests/integration.test.ts, so
+ * a clean checkout stays green. The in-process ones need no cluster and always run.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { once } from 'node:events'
+import type { AddressInfo } from 'node:net'
+import { fileURLToPath } from 'node:url'
 import { createLogger, setLogSink, type LogLine } from '../src/log.js'
 import { closePool, query } from '../src/db.js'
 import { LIVE as liveCluster } from './live.js'
+import {
+  boot,
+  bootBannerLines,
+  checkPlaybookModel,
+  isEntryPoint,
+  productionBootDeps,
+  resolveBindHost,
+  type BootDeps,
+} from '../src/server.js'
+import { VERSION } from '../src/routes.js'
+import { config } from '../src/config.js'
+import { assertPlaybookModel } from '../src/memory.js'
 
 // Reachability, not just presence — see tests/live.ts for why the distinction matters.
 const LIVE = liveCluster
@@ -464,4 +483,307 @@ describe.skipIf(!LIVE)('decision logging covers allow as well as hold (C4)', () 
     // and 5s is not a budget it can meet. Offline — how CI and the Makefile run it — it finishes in
     // well under 300ms, so the allowance costs nothing when it is not needed.
   }, 30_000)
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The bootstrap, in process.
+//
+// src/server.ts is importable without booting: the only statement with a side effect is the
+// entry-point guard at the bottom, which is true exactly when the module IS `process.argv[1]`. So
+// everything the boot decides can be called directly here, while the boot itself is still performed
+// for real by the child process above.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('resolveBindHost', () => {
+  it('binds loopback when nothing says otherwise', () => {
+    // `server.listen(port)` bound every interface, which on conference wifi puts an unauthenticated
+    // route that wipes the demo's memory on the local network.
+    expect(resolveBindHost({})).toBe('127.0.0.1')
+  })
+
+  it('honours SLEEPER_BIND_HOST, because a container has to bind 0.0.0.0 to be reachable', () => {
+    expect(resolveBindHost({ SLEEPER_BIND_HOST: '0.0.0.0' })).toBe('0.0.0.0')
+  })
+})
+
+describe('bootBannerLines', () => {
+  const base = { host: '127.0.0.1', port: 3000, offline: false, provider: 'inference: stub' }
+
+  it('names the URL and the inference path — this is what a judge sees in the recording', () => {
+    expect(bootBannerLines(base)).toEqual(['Sleeper demo on http://127.0.0.1:3000', 'inference: stub'])
+  })
+
+  it('says so out loud when the run is offline', () => {
+    expect(bootBannerLines({ ...base, offline: true })).toContain(
+      'OFFLINE MODE — deterministic stand-in for Bedrock. Wiring only, no quality claims.',
+    )
+  })
+
+  it('warns when the bind is not loopback, naming what that exposes', () => {
+    const lines = bootBannerLines({ ...base, host: '0.0.0.0' })
+    const warning = lines.find((l) => l.startsWith('WARNING'))!
+    expect(warning).toContain('bound to 0.0.0.0, not loopback')
+    expect(warning).toContain('/api/replay resets this package')
+    expect(warning).toContain('no authentication')
+  })
+
+  it('does not warn for either spelling of loopback', () => {
+    for (const host of ['127.0.0.1', 'localhost']) {
+      expect(bootBannerLines({ ...base, host }).some((l) => l.startsWith('WARNING'))).toBe(false)
+    }
+  })
+})
+
+describe('checkPlaybookModel', () => {
+  function capture(): { lines: LogLine[]; restore: () => void } {
+    const lines: LogLine[] = []
+    const previous = setLogSink((line) => lines.push(line))
+    return { lines, restore: () => setLogSink(previous) }
+  }
+
+  it('passes silently when the corpus agrees with the configured model', async () => {
+    const { lines, restore } = capture()
+    try {
+      await expect(checkPlaybookModel(async () => {})).resolves.toBeUndefined()
+      expect(lines).toEqual([])
+    } finally {
+      restore()
+    }
+  })
+
+  it('refuses the boot on an embedding model mismatch', async () => {
+    // The thrown message is a complete operator instruction, and a boot that dies printing it is
+    // worth more than a server that comes up unable to decide — which is what this used to do,
+    // reporting health `ok` right up until a release was assessed, mid-recording.
+    const err = new Error('embedding model mismatch: corpus embedded with titan-v1, process uses v2')
+    await expect(
+      checkPlaybookModel(async () => {
+        throw err
+      }),
+    ).rejects.toThrow(err)
+  })
+
+  it('boots anyway when the check could not be made at all', async () => {
+    // A cluster that could not answer is not a check that said no. `/api/health` reports that as
+    // 503 and `/api/state` degrades for it, and neither can report anything from a process that
+    // refused to listen.
+    const { lines, restore } = capture()
+    try {
+      await expect(
+        checkPlaybookModel(async () => {
+          throw new Error('relation "takeover_playbook" does not exist')
+        }),
+      ).resolves.toBeUndefined()
+      expect(lines.map((l) => l.event)).toEqual(['startup.playbook_model_uncheckable'])
+    } finally {
+      restore()
+    }
+  })
+
+  it('treats a non-Error throw as uncheckable rather than as a mismatch', async () => {
+    // The discrimination is on `.message`, so anything without one cannot be the fatal case.
+    const { lines, restore } = capture()
+    try {
+      await expect(
+        checkPlaybookModel(async () => {
+          throw 'pool destroyed'
+        }),
+      ).resolves.toBeUndefined()
+      expect(lines.map((l) => l.event)).toEqual(['startup.playbook_model_uncheckable'])
+    } finally {
+      restore()
+    }
+  })
+})
+
+describe('isEntryPoint', () => {
+  const selfUrl = new URL('../src/server.ts', import.meta.url).href
+
+  it('says yes when the module is what the process was started with', () => {
+    expect(isEntryPoint(selfUrl, fileURLToPath(selfUrl))).toBe(true)
+  })
+
+  it('says yes for a relative argv[1], which is how `tsx src/server.ts` arrives', () => {
+    expect(isEntryPoint(selfUrl, 'src/../src/server.ts')).toBe(true)
+  })
+
+  it('says no when something else is the entry point', () => {
+    expect(isEntryPoint(selfUrl, fileURLToPath(new URL('../src/routes.ts', import.meta.url)))).toBe(
+      false,
+    )
+  })
+
+  it('says no when there is no argv[1] at all', () => {
+    expect(isEntryPoint(selfUrl, undefined)).toBe(false)
+  })
+
+  it('says no rather than throwing when a path cannot be resolved', () => {
+    // Nothing was started, so nothing is broken by saying no.
+    expect(isEntryPoint(selfUrl, '/definitely/not/here/server.ts')).toBe(false)
+    expect(isEntryPoint('not-a-file-url', process.argv[1])).toBe(false)
+  })
+
+  it('is false under this test runner, which is why importing src/server.ts does not boot', () => {
+    expect(isEntryPoint(selfUrl, process.argv[1])).toBe(false)
+  })
+})
+
+describe('productionBootDeps', () => {
+  it('names the real collaborators and reads the real configuration', () => {
+    const deps = productionBootDeps()
+    expect(deps.port).toBe(config.port)
+    expect(deps.host).toBe(resolveBindHost(process.env))
+    expect(deps.version).toBe(VERSION)
+    expect(typeof deps.offline).toBe('boolean')
+    expect(deps.assertPlaybookModel).toBe(assertPlaybookModel)
+    // Referenced, not wrapped: an arrow here would be one more thing that can be wrong.
+    expect(deps.exit).toBe(process.exit)
+    expect(deps.log).toBe(console.log)
+    expect(typeof deps.router.handle).toBe('function')
+    expect(typeof deps.providerBanner()).toBe('string')
+  })
+
+  it('registers the handler on the process, which is the one thing a test must not inherit', () => {
+    const deps = productionBootDeps()
+    const handler = (): void => {}
+    // SIGUSR2 rather than SIGTERM: this asserts the registration, and the runner keeps its own.
+    deps.onSignal('SIGUSR2', handler)
+    try {
+      expect(process.listeners('SIGUSR2')).toContain(handler)
+    } finally {
+      process.off('SIGUSR2', handler)
+    }
+  })
+})
+
+describe('boot', () => {
+  /** A router that answers everything, so this describe is about the boot and not about routing. */
+  function stubRouter(): { router: BootDeps['router']; shutdowns: () => number } {
+    let shutdowns = 0
+    return {
+      router: {
+        handle: async (_req, res) => {
+          res.writeHead(200, { 'content-type': 'text/plain' })
+          res.end('ok')
+        },
+        shutdown: () => {
+          shutdowns++
+        },
+      },
+      shutdowns: () => shutdowns,
+    }
+  }
+
+  function harness(overrides: Partial<BootDeps> = {}): {
+    deps: BootDeps
+    logged: string[]
+    signals: [NodeJS.Signals, () => void][]
+    exits: number[]
+    pools: () => number
+    shutdowns: () => number
+  } {
+    const { router, shutdowns } = stubRouter()
+    const logged: string[] = []
+    const signals: [NodeJS.Signals, () => void][] = []
+    const exits: number[] = []
+    let pools = 0
+    const deps: BootDeps = {
+      router,
+      host: '127.0.0.1',
+      // Port 0: an ephemeral port, so this never collides with a demo server or with the child
+      // process above. The banner reports `deps.port`, so it says 0 — asserted against
+      // `bootBannerLines` rather than against a hardcoded string.
+      port: 0,
+      offline: true,
+      providerBanner: () => 'inference: stub',
+      version: '9.9.9',
+      assertPlaybookModel: async () => {},
+      closePool: async () => {
+        pools++
+      },
+      log: (line) => logged.push(line),
+      exit: (code) => exits.push(code),
+      onSignal: (signal, handler) => signals.push([signal, handler]),
+      ...overrides,
+    }
+    return { deps, logged, signals, exits, pools: () => pools, shutdowns }
+  }
+
+  it('listens, prints the banner, logs server.listening and serves through the router', async () => {
+    const { deps, logged, signals } = harness()
+    const lines: LogLine[] = []
+    const previous = setLogSink((line) => lines.push(line))
+    let booted
+    try {
+      booted = await boot(deps)
+    } finally {
+      setLogSink(previous)
+    }
+
+    const { port } = booted.server.address() as AddressInfo
+    expect(port).toBeGreaterThan(0)
+    const res = await fetch(`http://127.0.0.1:${port}/api/state`)
+    expect(await res.text()).toBe('ok')
+
+    expect(logged).toEqual(
+      bootBannerLines({ host: '127.0.0.1', port: 0, offline: true, provider: 'inference: stub' }),
+    )
+    expect(lines.find((l) => l.event === 'server.listening')).toMatchObject({
+      host: '127.0.0.1',
+      version: '9.9.9',
+      inference: 'offline',
+    })
+    // Both signals, pointed at the same shutdown.
+    expect(signals.map(([s]) => s)).toEqual(['SIGINT', 'SIGTERM'])
+    expect(signals[0]![1]).toBe(signals[1]![1])
+
+    booted.shutdown()
+    await vi.waitFor(() => expect(booted!.server.listening).toBe(false))
+  })
+
+  it("reports inference 'bedrock' when the process is not offline", async () => {
+    const { deps } = harness({ offline: false })
+    const lines: LogLine[] = []
+    const previous = setLogSink((line) => lines.push(line))
+    let booted
+    try {
+      booted = await boot(deps)
+    } finally {
+      setLogSink(previous)
+    }
+    expect(lines.find((l) => l.event === 'server.listening')!.inference).toBe('bedrock')
+    booted.shutdown()
+    await vi.waitFor(() => expect(booted!.server.listening).toBe(false))
+  })
+
+  it('lets go of the audit session, closes the pool and exits — in that order', async () => {
+    // The cached reader outlives a request, so shutdown is the one place that has to let go of it,
+    // and `server.close` waits for the in-flight request before the pool goes.
+    const { deps, exits, pools, shutdowns } = harness()
+    const previous = setLogSink(() => {})
+    let booted
+    try {
+      booted = await boot(deps)
+    } finally {
+      setLogSink(previous)
+    }
+
+    booted.shutdown()
+    expect(shutdowns()).toBe(1) // the router is retired synchronously, before the socket closes
+    await vi.waitFor(() => expect(exits).toEqual([0]))
+    expect(pools()).toBe(1)
+    expect(booted.server.listening).toBe(false)
+  })
+
+  it('refuses to listen at all on an embedding model mismatch', async () => {
+    const { deps, signals, logged } = harness({
+      assertPlaybookModel: async () => {
+        throw new Error('embedding model mismatch: re-seed, or point the process back at titan-v1')
+      },
+    })
+    await expect(boot(deps)).rejects.toThrow(/embedding model mismatch/)
+    // Nothing was created, so there is nothing to clean up and no banner claiming a live server.
+    expect(signals).toEqual([])
+    expect(logged).toEqual([])
+  })
 })

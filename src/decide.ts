@@ -87,6 +87,13 @@ export function decide(matches: PlaybookMatch[], thresholds: Thresholds): Decisi
       `Arc matches known takeover shape ${matched.packageId} at cosine similarity ` +
       `${similarity.toFixed(4)} (>= ${thresholds.holdAt}), and sits ${margin.toFixed(4)} ` +
       `(>= ${thresholds.minMargin}) closer to that shape than to the nearest ordinary ` +
+      // This whole line only runs when `hold` is true (see the `else if (hold)` above), and `hold`
+      // is `Boolean(matched) && meetsSimilarity && meetsMargin`, where `meetsMargin` is
+      // `contrastable && margin >= thresholds.minMargin` and `contrastable` is
+      // `Boolean(matched && nearestBenign)`. So `hold === true` structurally implies `nearestBenign`
+      // is non-null: the `: ''` side of the ternary below would need `hold` true with
+      // `nearestBenign` null, which decide()'s own invariants above make impossible.
+      /* v8 ignore next -- unreachable: hold===true implies nearestBenign is non-null (see above) */
       `contributor arc${nearestBenign ? ` (${nearestBenign.packageId})` : ''}.`
   } else if (!meetsSimilarity) {
     explanation =

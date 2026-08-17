@@ -540,6 +540,10 @@ async function composeHoldText(
   const prompt = [
     `Package: ${opts.packageId}`,
     `Release held: ${version}`,
+    // `composeHoldText` is only ever called from the `decision.hold` branch of `assess` (below),
+    // and `decide()` defines `hold` as `Boolean(matched) && meetsSimilarity && meetsMargin` — so by
+    // the time control reaches here, `decision.matched` is structurally guaranteed non-null.
+    /* v8 ignore next -- unreachable: hold===true (the only caller) implies decision.matched is non-null */
     `Nearest known takeover shape: ${decision.matched?.packageId ?? 'n/a'} at cosine similarity ` +
       `${decision.similarity.toFixed(4)}`,
     `Separation from the nearest ordinary-contributor shape: ${decision.margin.toFixed(4)}`,
@@ -673,7 +677,13 @@ async function assess(
   }
 
   // `actorIds` is never empty — `selectCandidates` always returns at least the event's own actor —
-  // so this is a type narrowing, not a real branch.
+  // so this is a type narrowing, not a real branch. Verified: `selectCandidates` either returns
+  // `[opts.override]` (length 1) or pushes `opts.mustInclude` first when truthy; `assess()`'s only
+  // call site passes `mustInclude: event.actorId`, and every `TimelineEvent` reaching this point was
+  // already validated to carry a non-empty `actorId` (handler.ts's `parseEvent` rejects a missing
+  // one; the bundled corpus's actor ids are all non-empty strings) — so the `for` loop above always
+  // runs at least once and unconditionally sets `best` on its first iteration.
+  /* v8 ignore next -- unreachable: selectCandidates() never returns an empty actorIds, so the loop above always sets `best` */
   if (!best) throw new Error('assess: no candidate was assessed')
 
   const { decision, explain, neighbours, matches, arc } = best
@@ -743,6 +753,10 @@ async function assess(
     packageId: opts.packageId,
     releaseVersion: version,
     reason,
+    // Reached only past the `if (!decision.hold) return` guard above, so `decision.hold` is true
+    // here — and, as at the `composeHoldText` call site, `decide()`'s own definition of `hold` makes
+    // `decision.matched` structurally non-null whenever that is the case.
+    /* v8 ignore next -- unreachable: decision.hold===true (guaranteed above) implies decision.matched is non-null */
     matchedPlaybookId: decision.matched?.id ?? null,
     similarity: decision.similarity,
     advisoryText: advisory,

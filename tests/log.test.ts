@@ -261,4 +261,48 @@ describe('the default sink cannot be killed by its own payload', () => {
     expect(out).toContain('sink.bigint')
     expect(out).toMatch(/1180591620717411303424n|droppedKeys/)
   })
+
+  // Tier two's replacer neutralises the two cases the docstring names — BigInt and a circular
+  // reference — because a replacer is invoked with a value only AFTER `JSON.stringify` has
+  // successfully retrieved it. That is precisely what a throwing `toJSON()` (or an accessor
+  // property that throws on read) defeats: the exception fires while the value is being read,
+  // before the replacer ever runs, so the SAME retry that rescues a BigInt or a circular ref
+  // throws again on this input. Confirmed directly against plain `JSON.stringify` before writing
+  // this test: `JSON.stringify(x, replacer)` still throws when `x.toJSON` throws. This is what
+  // makes tier three (the hand-built line) live code rather than a fallback that can never fire.
+  it('survives a field whose toJSON() throws, defeating the replacer, and still names the event', async () => {
+    const poison = {
+      toJSON(): never {
+        throw new Error('poison')
+      },
+    }
+    const out = await emitOnFreshModule((m) => m.emit('error', 'sink.poison', { poison }))
+    // Tier three fired: the hand-built line, not either JSON.stringify attempt.
+    expect(out).toContain('sink.poison')
+    expect(out).toContain('"logSerialisationFailed":"poison"')
+    // The offending key is named so the gap is traceable, and ts/level/event — which tier three
+    // reconstructs by hand rather than through the failed stringify — are still present and correct.
+    const parsed = JSON.parse(out)
+    expect(parsed.droppedKeys).toEqual(['poison'])
+    expect(parsed.level).toBe('error')
+    expect(parsed.event).toBe('sink.poison')
+    expect(new Date(parsed.ts).toISOString()).toBe(parsed.ts)
+  })
+
+  // The `err` tier three reports on is whatever tier one's `JSON.stringify` threw — and a `toJSON`
+  // (or a throwing getter) can `throw` anything, not just an `Error`. This pins the other half of
+  // `err instanceof Error ? err.message : String(err)`: a non-Error throw must still produce a
+  // readable `logSerialisationFailed`, via `String()`, not a crash trying to read `.message` off it.
+  it('describes a non-Error throw from toJSON() with String(), not err.message', async () => {
+    const poison = {
+      // Deliberately a plain string throw, not `new Error(...)` — the point of this test.
+      toJSON(): never {
+        throw 'plain string throw'
+      },
+    }
+    const out = await emitOnFreshModule((m) => m.emit('error', 'sink.poison.nonerror', { poison }))
+    const parsed = JSON.parse(out)
+    expect(parsed.logSerialisationFailed).toBe('plain string throw')
+    expect(parsed.droppedKeys).toEqual(['poison'])
+  })
 })

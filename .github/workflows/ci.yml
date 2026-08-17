@@ -3,7 +3,7 @@ name: CI
 # The point of this pipeline is that the claim in the README — "a fresh clone reproduces the whole
 # suite with no AWS account and no CockroachDB Cloud subscription" — is checked on every push
 # rather than asserted once. The integration job stands up a real CockroachDB node, applies the
-# real schema (vector indexes included) and runs the 39 cluster-backed tests. If that stops being
+# real schema (vector indexes included) and runs the cluster-backed tests. If that stops being
 # true, this goes red.
 
 on:
@@ -75,10 +75,22 @@ jobs:
         env:
           DATABASE_URL: postgresql://root@localhost:26257/sleeper?sslmode=disable
 
-      - name: Full suite, including the 39 cluster-backed tests
+      - name: Full suite, including the cluster-backed tests
         run: npm test
         env:
           DATABASE_URL: postgresql://root@localhost:26257/sleeper?sslmode=disable
+      - name: Coverage must stay at 100%
+        # A floor, not a milestone. Reaching full coverage once is easy to lose: the next feature
+        # lands with two untested branches, the number reads 99.4%, nobody notices. This fails the
+        # build on the commit that caused it instead.
+        #
+        # Not a correctness claim. decide.ts sat at 100% lines while shipping a gate whose abstain
+        # path never fired, so this proves no line is unexamined — nothing more.
+        run: npm run coverage
+        env:
+          DATABASE_URL: postgresql://root@localhost:26257/sleeper?sslmode=disable
+          SLEEPER_OFFLINE: '1'
+
       - name: The documented test counts must be current
         # tests/claims.test.ts asserts the README against tests/counts.json, so both can be stale
         # together and the assertion still passes — which is exactly what happened once. This
