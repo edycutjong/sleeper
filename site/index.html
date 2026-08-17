@@ -541,6 +541,7 @@
         <li><a href="#stack">CockroachDB &times; AWS</a></li>
         <li><a href="#run">Run it</a></li>
         <li><a href="#ledger">Honest ledger</a></li>
+        <li><a href="https://github.com/edycutjong/sleeper-release-gate" rel="noopener">Source</a></li>
       </ul>
     </nav>
   </div>
@@ -1261,8 +1262,19 @@ npm run explain -- --hold <uuid>">copy</button></div>
       <p class="sec-intro">
         Prerequisites: Node.js &ge; 22 &middot; a CockroachDB cluster with vector indexing (Cloud Basic, or
         a local v25.2+ node) &middot; an AWS account with Bedrock access for Titan Text Embeddings V2 and a
-        Claude model. Full methodology lives in <code>DEMO.md</code> in the repo.
+        Claude model. Full methodology lives in <code>DEMO.md</code> in
+        <a href="https://github.com/edycutjong/sleeper-release-gate" rel="noopener">the repository</a>.
       </p>
+
+      <h3>0 &middot; Clone it</h3>
+      <div class="codebox">
+        <div class="cb-head"><span>terminal</span><button class="copy" type="button" aria-label="Copy the clone command" data-copy="git clone https://github.com/edycutjong/sleeper-release-gate.git
+cd sleeper-release-gate
+npm install">copy</button></div>
+        <pre><code><span class="pr">$</span> git clone https://github.com/edycutjong/sleeper-release-gate.git
+<span class="pr">$</span> cd sleeper-release-gate
+<span class="pr">$</span> npm install</code></pre>
+      </div>
 
       <h3>1 &middot; Provision the cluster <span class="mono-tag">— CockroachDB ccloud CLI</span></h3>
       <div class="codebox">
