@@ -71,17 +71,15 @@ jobs:
       - name: Install Vercel CLI
         run: npm i -g vercel@latest
 
-      - name: Pull project settings
-        working-directory: site
-        run: vercel pull --yes --environment=production --token="${{ secrets.VERCEL_TOKEN }}"
-
-      - name: Build
-        working-directory: site
-        run: vercel build --prod --token="${{ secrets.VERCEL_TOKEN }}"
-
+      # Plain `vercel deploy`, NOT `vercel build` + `--prebuilt`. This project is a bare static
+      # directory: no framework, no build command. `vercel build` produces an empty
+      # .vercel/output for it, and deploying that prebuilt output publishes nothing — which is
+      # exactly what happened the first time this workflow ran, and it 404'd the live demo for
+      # four minutes. `vercel deploy` uploads the directory as-is, which is the command that has
+      # always worked by hand.
       - name: Deploy
         working-directory: site
-        run: vercel deploy --prebuilt --prod --token="${{ secrets.VERCEL_TOKEN }}"
+        run: vercel deploy --prod --yes --token="${{ secrets.VERCEL_TOKEN }}"
 
       # Deploying is not the same as being reachable. Check the domain judges actually visit,
       # and fail loudly rather than leaving a green tick over a broken page.
