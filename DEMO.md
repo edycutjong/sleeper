@@ -888,8 +888,8 @@ npm test          # unit tests only; integration tests skip without DATABASE_URL
 DATABASE_URL='postgresql://root@localhost:26257/sleeper?sslmode=disable' npm test
 ```
 
-381 tests: `206 passed | 41 skipped` with no database, `381 passed` against a reachable cluster.
-A `DATABASE_URL` that is set but unreachable skips the 39 and prints why rather than failing —
+586 tests: `520 passed | 66 skipped` with no database, `586 passed` against a reachable cluster.
+A `DATABASE_URL` that is set but unreachable skips the 66 and prints why rather than failing —
 a stale credential should not look like broken code.
 
 The cluster-backed suite asserts, among other things:

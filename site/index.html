@@ -8,18 +8,39 @@
 <meta name="color-scheme" content="dark light">
 <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0A0F1D">
 <meta name="theme-color" media="(prefers-color-scheme: light)" content="#F6F4ED">
+<link rel="canonical" href="https://sleeper.edycu.dev/">
+<meta name="author" content="Sleeper">
+<meta name="robots" content="index, follow, max-image-preview:large">
+
+<!-- Open Graph. These URLs are ABSOLUTE on purpose: og:image is fetched by a crawler that has no
+     page context, so a relative path silently yields a blank card on Slack, Discord and LinkedIn. -->
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Sleeper">
+<meta property="og:locale" content="en_US">
+<meta property="og:url" content="https://sleeper.edycu.dev/">
 <meta property="og:title" content="Sleeper — the release gate that remembers">
 <meta property="og:description" content="A backdoor planted over 28 months is invisible to every per-commit check. Only a memory that spans those years can see it.">
-<meta property="og:image" content="assets/og-image.png">
+<meta property="og:image" content="https://sleeper.edycu.dev/assets/og-image.png">
+<meta property="og:image:secure_url" content="https://sleeper.edycu.dev/assets/og-image.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="Sleeper — release-gate agent with multi-year memory, built on CockroachDB and AWS Bedrock">
+
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Sleeper — the release gate that remembers">
 <meta name="twitter:description" content="A backdoor planted over 28 months is invisible to every per-commit check. Only a memory that spans those years can see it.">
-<meta name="twitter:image" content="assets/og-image.png">
+<meta name="twitter:image" content="https://sleeper.edycu.dev/assets/og-image.png">
 <meta name="twitter:image:alt" content="Sleeper — release-gate agent with multi-year memory, built on CockroachDB and AWS Bedrock">
+
+<!-- Icons. Apple ignores alpha and composites on black, so apple-touch-icon is pre-flattened
+     onto the brand background rather than shipped transparent. -->
 <link rel="icon" type="image/svg+xml" href="assets/icon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png">
+<link rel="manifest" href="assets/site.webmanifest">
+<meta name="apple-mobile-web-app-title" content="Sleeper">
+<meta name="application-name" content="Sleeper">
 <style>
   :root {
     --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
@@ -173,6 +194,8 @@
   nav.top::-webkit-scrollbar { display: none; }
   nav.top ul { display: flex; gap: 1.1rem; list-style: none; margin: 0; padding: 0; white-space: nowrap; }
   nav.top a { display: inline-block; color: var(--mut); text-decoration: none; font-size: 0.86rem; font-weight: 600; transition: color var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out); }
+  nav.top a.gh { display: inline-flex; align-items: center; gap: 0.4em; }
+  nav.top a.gh svg { width: 1.05em; height: 1.05em; flex: none; fill: currentColor; }
   nav.top a:hover { color: var(--ink); }
   nav.top a:active { transform: translateY(1px); }
 
@@ -541,7 +564,7 @@
         <li><a href="#stack">CockroachDB &times; AWS</a></li>
         <li><a href="#run">Run it</a></li>
         <li><a href="#ledger">Honest ledger</a></li>
-        <li><a href="https://github.com/edycutjong/sleeper-release-gate" rel="noopener">Source</a></li>
+        <li><a class="gh" href="https://github.com/edycutjong/sleeper" rel="noopener"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.42 7.42 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>Source</a></li>
       </ul>
     </nav>
   </div>
@@ -1263,16 +1286,16 @@ npm run explain -- --hold <uuid>">copy</button></div>
         Prerequisites: Node.js &ge; 22 &middot; a CockroachDB cluster with vector indexing (Cloud Basic, or
         a local v25.2+ node) &middot; an AWS account with Bedrock access for Titan Text Embeddings V2 and a
         Claude model. Full methodology lives in <code>DEMO.md</code> in
-        <a href="https://github.com/edycutjong/sleeper-release-gate" rel="noopener">the repository</a>.
+        <a href="https://github.com/edycutjong/sleeper" rel="noopener">the repository</a>.
       </p>
 
       <h3>0 &middot; Clone it</h3>
       <div class="codebox">
-        <div class="cb-head"><span>terminal</span><button class="copy" type="button" aria-label="Copy the clone command" data-copy="git clone https://github.com/edycutjong/sleeper-release-gate.git
-cd sleeper-release-gate
+        <div class="cb-head"><span>terminal</span><button class="copy" type="button" aria-label="Copy the clone command" data-copy="git clone https://github.com/edycutjong/sleeper.git
+cd sleeper
 npm install">copy</button></div>
-        <pre><code><span class="pr">$</span> git clone https://github.com/edycutjong/sleeper-release-gate.git
-<span class="pr">$</span> cd sleeper-release-gate
+        <pre><code><span class="pr">$</span> git clone https://github.com/edycutjong/sleeper.git
+<span class="pr">$</span> cd sleeper
 <span class="pr">$</span> npm install</code></pre>
       </div>
 
@@ -1338,18 +1361,18 @@ npm run schema && npm run seed && npm run calibrate && npm run replay">copy</but
         refuses to run in this mode at all.
       </p>
 
-      <h3>4 &middot; Tests <span class="mono-tag">— 381 in the suite</span></h3>
+      <h3>4 &middot; Tests <span class="mono-tag">— 586 in the suite</span></h3>
       <div class="codebox">
         <div class="cb-head"><span>terminal</span><button class="copy" type="button" aria-label="Copy the test commands" data-copy="npm test">copy</button></div>
         <pre><code><span class="pr">$</span> npm test   <span class="cm"># cluster-dependent tests skip without DATABASE_URL</span>
 <span class="pr">$</span> DATABASE_URL='postgresql://root@localhost:26257/sleeper?sslmode=disable' npm test
 
 <span class="cm"># with no DATABASE_URL and no credentials:</span>
-<span class="hl">Tests  333 passed | 48 skipped (381)</span></code></pre>
+<span class="hl">Tests  520 passed | 66 skipped (586)</span></code></pre>
       </div>
       <p class="run-note">
-        <strong>381 tests.</strong> On a bare clone with no credentials, <strong>333 pass</strong> and
-        <strong>48 skip</strong> pending a live cluster — the 48 assert the <code>prefix spans</code> plan
+        <strong>586 tests.</strong> On a bare clone with no credentials, <strong>520 pass</strong> and
+        <strong>66 skip</strong> pending a live cluster — the 66 assert the <code>prefix spans</code> plan
         line, held-out exclusion, the all-or-nothing hold and unhold transactions, and point-in-time
         correctness (a decision can never see an event from after its own assessment timestamp). They
         namespace every row to a per-run package id, so they are safe to point at the demo cluster. Those
@@ -1381,7 +1404,7 @@ npm run schema && npm run seed && npm run calibrate && npm run replay">copy</but
         <div class="ledger-card reveal">
           <h3>True today</h3>
           <ul>
-            <li><strong>381 tests</strong> — 332 pass on a bare clone, 48 skip until a live cluster is reachable.</li>
+            <li><strong>586 tests</strong> — 520 pass on a bare clone, 66 skip until a live cluster is reachable.</li>
             <li>The hold is <strong>all-or-nothing under an explicit rollback test</strong>, and history reads are bounded by the assessment timestamp.</li>
             <li>A hold has <strong>a recorded way out</strong>: <code>commitUnhold</code> flips trust state, queues a retraction advisory and appends an audit row in one transaction, and the hold row itself is append-only.</li>
             <li>Two SQL identities split <strong>setup versus runtime</strong>, provisioned by script and applied as real <code>GRANT</code>s: <code>sleeper_admin</code> (DDL and the destructive setup paths) and <code>gate_svc</code> (the running agent — <strong>no DELETE anywhere, no DDL, no playbook writes</strong>). That split is <strong>verified by execution, not by reading the grants</strong>: run against the live cluster, <code>gate_svc</code> is refused DELETE on every table, playbook INSERT, <code>SET CLUSTER SETTING</code> and <code>DROP TABLE</code> — every refusal <code>SQLSTATE 42501</code>, transcript in <code>DEMO.md</code>. With <code>--mcp-key</code>, a third identity is created for the audit surface: a read-only Cloud service account, which is not a SQL identity. An earlier <code>ingest_svc</code> was <strong>deleted rather than patched</strong> — it could not run the webhook it was named after.</li>
@@ -1414,7 +1437,7 @@ npm run schema && npm run seed && npm run calibrate && npm run replay">copy</but
             </tr>
             <tr>
               <td>Technical Implementation</td>
-              <td>Three inline vector indexes, <code>&lt;=&gt;</code> retrieval with an <code>EXPLAIN</code>-asserted <code>prefix spans</code> pre-filter, one ACID hold transaction, 381 tests. <a href="#architecture">&sect; Architecture</a></td>
+              <td>Three inline vector indexes, <code>&lt;=&gt;</code> retrieval with an <code>EXPLAIN</code>-asserted <code>prefix spans</code> pre-filter, one ACID hold transaction, 586 tests. <a href="#architecture">&sect; Architecture</a></td>
             </tr>
             <tr>
               <td>Real-World Impact</td>

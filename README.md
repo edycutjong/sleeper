@@ -17,7 +17,7 @@ so the memory layer *is* the product.**
 
 <br />
 
-[**Live site**](https://sleeper-nu.vercel.app) · [**Run it yourself**](#-getting-started) · [**Architecture**](#%EF%B8%8F-architecture--tech-stack) · [**Reproduce the numbers**](DEMO.md)
+[**Live site**](https://sleeper.edycu.dev) · [**Run it yourself**](#-getting-started) · [**Architecture**](#%EF%B8%8F-architecture--tech-stack) · [**Reproduce the numbers**](DEMO.md)
 
 <br />
 

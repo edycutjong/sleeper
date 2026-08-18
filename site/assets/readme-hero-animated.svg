@@ -141,7 +141,7 @@
   <text class="sans" x="56" y="182" font-size="15" fill="#97A3BD">it sees the slow takeover and holds the release before it ships.</text>
 
   <!-- hero metric (pulsing) -->
-  <text class="mono metric" x="56" y="214" font-size="13.5" fill="#FFB224">▸ xz 5.6.0 HELD — 35 days before the real-world catch</text>
+  <text class="mono metric" x="56" y="214" font-size="13.5" fill="#FFB224">▸ xz 5.6.0 HELD — 34 days before the real-world catch</text>
 
   <!-- tech line -->
   <text class="mono" x="56" y="240" font-size="12" fill="#4C566E">CockroachDB · VECTOR INDEX · MCP · Bedrock · Lambda · S3</text>

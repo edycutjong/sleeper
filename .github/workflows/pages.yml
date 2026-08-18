@@ -41,10 +41,20 @@ jobs:
         # no external stylesheet, no runtime fetch. A judge opening it offline, or behind a
         # corporate proxy, should see exactly what we see. This fails the build rather than
         # discovering it in front of them.
+        # rel="canonical" and rel="alternate" are exempt: they are metadata addressed to crawlers
+        # and cause no fetch, so they cannot break an offline or proxied render. Everything that
+        # actually pulls a byte — stylesheets, preload, prefetch, preconnect, scripts — still fails.
+        # Matched per TAG, not per line: two <link>s can share a line, and a line-level exclusion
+        # would let a CDN stylesheet ride in next to an exempt canonical tag.
         run: |
-          if grep -qE '<script[^>]+src=|<link[^>]+href="https?://' site/index.html; then
+          offenders=$(grep -oE '<link[^>]*>' site/index.html \
+                        | grep -E 'href="https?://' \
+                        | grep -vE 'rel="(canonical|alternate)"' || true)
+          scripts=$(grep -oE '<script[^>]+src=[^>]*>' site/index.html || true)
+          if [ -n "$offenders" ] || [ -n "$scripts" ]; then
             echo "::error file=site/index.html::the page pulls an external script or stylesheet — it must be self-contained"
-            grep -nE '<script[^>]+src=|<link[^>]+href="https?://' site/index.html
+            [ -n "$scripts" ]   && echo "$scripts"
+            [ -n "$offenders" ] && echo "$offenders"
             exit 1
           fi
           for asset in $(grep -oE '(src|href)="assets/[^"]+"' site/index.html | cut -d'"' -f2 | sort -u); do
