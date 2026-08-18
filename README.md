@@ -1,12 +1,12 @@
 <div align="center">
 
-<img src="site/assets/icon.svg" width="96" alt="Sleeper" />
+<img src="docs/icon-animated.svg" width="144" alt="Sleeper" />
 
 # Sleeper
 
 <p><em>The release gate that remembers.</em></p>
 
-<img src="site/assets/readme-hero.png" alt="Sleeper — the release gate that remembers" width="820" />
+<img src="docs/readme-hero-animated.svg" alt="Sleeper — the release gate that remembers" width="820" />
 
 A release-gate agent whose multi-year memory of every commit, email and maintainer change
 recognises a slow-motion supply-chain takeover — the xz backdoor pattern — that no single code
@@ -27,6 +27,7 @@ so the memory layer *is* the product.**
 ![Node](https://img.shields.io/badge/Node-%E2%89%A522-339933?style=flat-square)
 ![Tests](https://img.shields.io/badge/tests-588_passing-22C55E?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
+[![Release](https://img.shields.io/badge/release-v1.0.0-FFB224?style=flat-square)](https://github.com/edycutjong/sleeper/releases/tag/v1.0.0)
 
 </div>
 
