@@ -25,7 +25,7 @@ so the memory layer *is* the product.**
 ![AWS Bedrock](https://img.shields.io/badge/AWS-Bedrock-FF9900?style=flat-square)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178C6?style=flat-square)
 ![Node](https://img.shields.io/badge/Node-%E2%89%A522-339933?style=flat-square)
-![Tests](https://img.shields.io/badge/tests-586_passing-22C55E?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-588_passing-22C55E?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 
 </div>
@@ -294,7 +294,7 @@ searchable arcs is a floor, not a scale result.
   agent cannot erase an event, a hold, an advisory or an audit row, and cannot reset a package's
   memory. It can hold a release and it can clear one, and both append.
   The split is exercised by which `DATABASE_URL` you export for which command, and every grant was
-  verified by creating the users and running the code under them — including six negative controls.
+  verified by creating the users and running the code under them — including seven negative controls.
   **Two honest caveats.** `src/db.ts` still builds one pool from one URL, so nothing in `src/`
   *switches* identity at runtime; the boundary is operational, not in-process. And `npm start` needs
   the admin URL, because its replay button resets memory — the deployed webhook is the path that runs
@@ -365,15 +365,15 @@ Full setup, reproduction steps and benchmark methodology: **[DEMO.md](DEMO.md)**
 
 ## 🧪 Testing & CI
 
-**586 tests.** On a fresh clone with no database and no AWS account, `npm test` prints
-`520 passed | 66 skipped (586)` — that is the honest output, and it is the one you should expect.
-The 66 need a reachable cluster; point `DATABASE_URL` at one and it becomes `586 passed`.
+**588 tests.** On a fresh clone with no database and no AWS account, `npm test` prints
+`522 passed | 66 skipped (588)` — that is the honest output, and it is the one you should expect.
+The 66 need a reachable cluster; point `DATABASE_URL` at one and it becomes `588 passed`.
 
 The gate is reachability, not configuration: a `DATABASE_URL` that is set but does not answer skips
-those 39 and prints why, naming the host and the driver's error. A stale credential should not look
+those 66 and prints why, naming the host and the driver's error. A stale credential should not look
 like broken code.
 
-The cluster-backed 48 assert the `prefix spans` plan line on both the neighbour query *and* the
+The cluster-backed 66 assert the `prefix spans` plan line on both the neighbour query *and* the
 query that actually makes the decision, held-out exclusion, all-or-nothing hold and unhold
 transactions, ingest idempotency under a retried delivery, and point-in-time correctness (a
 decision can never see an event from after its own assessment timestamp).

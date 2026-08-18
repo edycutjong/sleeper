@@ -92,7 +92,7 @@ $ cockroach sql --url "$GATE_SVC_URL" -e 'DELETE FROM takeover_playbook WHERE fa
 ERROR: user gate_svc does not have DELETE privilege on relation takeover_playbook
 SQLSTATE: 42501
 
-$ cockroach sql --url "$GATE_SVC_URL" -e 'INSERT INTO takeover_playbook ...'
+$ cockroach sql --url "$GATE_SVC_URL" -e 'INSERT INTO takeover_playbook SELECT * FROM takeover_playbook'
 ERROR: user gate_svc does not have INSERT privilege on relation takeover_playbook
 SQLSTATE: 42501
 
@@ -104,12 +104,12 @@ $ cockroach sql --url "$GATE_SVC_URL" -e 'DROP TABLE audit_log'
 ERROR: user gate_svc does not have DROP privilege on relation audit_log
 SQLSTATE: 42501
 
-$ cockroach sql --url "$GATE_SVC_URL" -e 'SELECT count(*) FROM events'   -- the reads it DOES need
+$ cockroach sql --url "$GATE_SVC_URL" -e 'SELECT count(*) AS events_readable FROM events'
 events_readable
 25
 ```
 
-Six refusals, every one `SQLSTATE 42501`, and the reads the agent genuinely needs still working. What
+Seven refusals, every one `SQLSTATE 42501`, and the reads the agent genuinely needs still working. What
 that buys, concretely: the agent that writes a hold cannot erase it, cannot erase the advisory
 queued alongside it, cannot erase the audit row, and cannot edit the playbook it is being measured
 against. Those are the four ways an append-only paper trail usually stops being append-only.
@@ -888,7 +888,7 @@ npm test          # unit tests only; integration tests skip without DATABASE_URL
 DATABASE_URL='postgresql://root@localhost:26257/sleeper?sslmode=disable' npm test
 ```
 
-586 tests: `520 passed | 66 skipped` with no database, `586 passed` against a reachable cluster.
+588 tests: `522 passed | 66 skipped` with no database, `588 passed` against a reachable cluster.
 A `DATABASE_URL` that is set but unreachable skips the 66 and prints why rather than failing —
 a stale credential should not look like broken code.
 

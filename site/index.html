@@ -1361,17 +1361,17 @@ npm run schema && npm run seed && npm run calibrate && npm run replay">copy</but
         refuses to run in this mode at all.
       </p>
 
-      <h3>4 &middot; Tests <span class="mono-tag">— 586 in the suite</span></h3>
+      <h3>4 &middot; Tests <span class="mono-tag">— 588 in the suite</span></h3>
       <div class="codebox">
         <div class="cb-head"><span>terminal</span><button class="copy" type="button" aria-label="Copy the test commands" data-copy="npm test">copy</button></div>
         <pre><code><span class="pr">$</span> npm test   <span class="cm"># cluster-dependent tests skip without DATABASE_URL</span>
 <span class="pr">$</span> DATABASE_URL='postgresql://root@localhost:26257/sleeper?sslmode=disable' npm test
 
 <span class="cm"># with no DATABASE_URL and no credentials:</span>
-<span class="hl">Tests  520 passed | 66 skipped (586)</span></code></pre>
+<span class="hl">Tests  522 passed | 66 skipped (588)</span></code></pre>
       </div>
       <p class="run-note">
-        <strong>586 tests.</strong> On a bare clone with no credentials, <strong>520 pass</strong> and
+        <strong>588 tests.</strong> On a bare clone with no credentials, <strong>522 pass</strong> and
         <strong>66 skip</strong> pending a live cluster — the 66 assert the <code>prefix spans</code> plan
         line, held-out exclusion, the all-or-nothing hold and unhold transactions, and point-in-time
         correctness (a decision can never see an event from after its own assessment timestamp). They
@@ -1404,7 +1404,7 @@ npm run schema && npm run seed && npm run calibrate && npm run replay">copy</but
         <div class="ledger-card reveal">
           <h3>True today</h3>
           <ul>
-            <li><strong>586 tests</strong> — 520 pass on a bare clone, 66 skip until a live cluster is reachable.</li>
+            <li><strong>588 tests</strong> — 522 pass on a bare clone, 66 skip until a live cluster is reachable.</li>
             <li>The hold is <strong>all-or-nothing under an explicit rollback test</strong>, and history reads are bounded by the assessment timestamp.</li>
             <li>A hold has <strong>a recorded way out</strong>: <code>commitUnhold</code> flips trust state, queues a retraction advisory and appends an audit row in one transaction, and the hold row itself is append-only.</li>
             <li>Two SQL identities split <strong>setup versus runtime</strong>, provisioned by script and applied as real <code>GRANT</code>s: <code>sleeper_admin</code> (DDL and the destructive setup paths) and <code>gate_svc</code> (the running agent — <strong>no DELETE anywhere, no DDL, no playbook writes</strong>). That split is <strong>verified by execution, not by reading the grants</strong>: run against the live cluster, <code>gate_svc</code> is refused DELETE on every table, playbook INSERT, <code>SET CLUSTER SETTING</code> and <code>DROP TABLE</code> — every refusal <code>SQLSTATE 42501</code>, transcript in <code>DEMO.md</code>. With <code>--mcp-key</code>, a third identity is created for the audit surface: a read-only Cloud service account, which is not a SQL identity. An earlier <code>ingest_svc</code> was <strong>deleted rather than patched</strong> — it could not run the webhook it was named after.</li>
@@ -1437,7 +1437,7 @@ npm run schema && npm run seed && npm run calibrate && npm run replay">copy</but
             </tr>
             <tr>
               <td>Technical Implementation</td>
-              <td>Three inline vector indexes, <code>&lt;=&gt;</code> retrieval with an <code>EXPLAIN</code>-asserted <code>prefix spans</code> pre-filter, one ACID hold transaction, 586 tests. <a href="#architecture">&sect; Architecture</a></td>
+              <td>Three inline vector indexes, <code>&lt;=&gt;</code> retrieval with an <code>EXPLAIN</code>-asserted <code>prefix spans</code> pre-filter, one ACID hold transaction, 588 tests. <a href="#architecture">&sect; Architecture</a></td>
             </tr>
             <tr>
               <td>Real-World Impact</td>
