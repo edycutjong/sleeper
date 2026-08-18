@@ -1,0 +1,97 @@
+name: Deploy site
+
+# The judge-facing page is https://sleeper.edycu.dev, served by Vercel from THIS repo's `site/`
+# directory. It used to be deployed by hand, which is exactly how it once sat for a day still
+# advertising the old repository name. This removes that failure mode.
+#
+# WHY `working-directory: site` AND NOT VERCEL'S GIT INTEGRATION:
+# the Vercel project's root is `site/`, but git integration builds from the repository root —
+# where there is no static output, only the agent's package.json. Connecting it that way once
+# and letting it deploy would have replaced a working demo with a failed build. Driving the CLI
+# from inside `site/` sidesteps that entirely: the directory we deploy is the directory Vercel
+# expects, and it is the same command that has been used manually all along.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+# One deploy at a time, and never cancel one in flight — a half-finished deploy of the page a
+# judge is looking at is worse than a slightly stale one.
+concurrency:
+  group: deploy-site
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://sleeper.edycu.dev
+    env:
+      VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      # Gate before publish. These are the two properties the page has to keep, and both have
+      # been broken by an ordinary-looking edit before:
+      #   1. every asset it references must exist — a 404 on the OG image is invisible locally
+      #   2. it must stay self-contained — no CDN script or stylesheet, so it renders the same
+      #      offline or behind a corporate proxy. rel="canonical" and rel="alternate" are exempt:
+      #      they address crawlers and fetch nothing. Matched per TAG, not per line, because two
+      #      <link>s can share a line and a line-level exclusion would let a CDN stylesheet ride
+      #      in beside an exempt canonical tag.
+      - name: Page is self-contained and every asset exists
+        run: |
+          offenders=$(grep -oE '<link[^>]*>' site/index.html \
+                        | grep -E 'href="https?://' \
+                        | grep -vE 'rel="(canonical|alternate)"' || true)
+          scripts=$(grep -oE '<script[^>]+src=[^>]*>' site/index.html || true)
+          if [ -n "$offenders" ] || [ -n "$scripts" ]; then
+            echo "::error file=site/index.html::the page pulls an external script or stylesheet"
+            [ -n "$scripts" ]   && echo "$scripts"
+            [ -n "$offenders" ] && echo "$offenders"
+            exit 1
+          fi
+          for asset in $(grep -oE '(src|href)="assets/[^"]+"' site/index.html | cut -d'"' -f2 | sort -u); do
+            test -f "site/$asset" || { echo "::error::site/index.html references missing $asset"; exit 1; }
+          done
+          echo "self-contained, and every referenced asset exists"
+
+      - name: Install Vercel CLI
+        run: npm i -g vercel@latest
+
+      - name: Pull project settings
+        working-directory: site
+        run: vercel pull --yes --environment=production --token="${{ secrets.VERCEL_TOKEN }}"
+
+      - name: Build
+        working-directory: site
+        run: vercel build --prod --token="${{ secrets.VERCEL_TOKEN }}"
+
+      - name: Deploy
+        working-directory: site
+        run: vercel deploy --prebuilt --prod --token="${{ secrets.VERCEL_TOKEN }}"
+
+      # Deploying is not the same as being reachable. Check the domain judges actually visit,
+      # and fail loudly rather than leaving a green tick over a broken page.
+      - name: Verify the live domain
+        run: |
+          for i in 1 2 3 4 5 6; do
+            code=$(curl -s -o /dev/null -m 20 -w '%{http_code}' https://sleeper.edycu.dev || echo 000)
+            echo "attempt $i: HTTP $code"
+            [ "$code" = "200" ] && exit 0
+            sleep 10
+          done
+          echo "::error::https://sleeper.edycu.dev did not return 200 after deploy"
+          exit 1
