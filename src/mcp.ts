@@ -1012,7 +1012,7 @@ async function defaultClientFactory(options: McpClientOptions): Promise<McpLike>
   const transport = new StreamableHTTPClientTransport(new URL(endpoint), {
     requestInit: { headers: mcpHeaders({ apiKey, clusterId }) },
   })
-  const client = new Client({ name: 'sleeper-release-gate', version: '0.1.0' }, { capabilities: {} })
+  const client = new Client({ name: 'sleeper', version: '0.1.0' }, { capabilities: {} })
   await client.connect(transport)
   return client as unknown as McpLike
 }
