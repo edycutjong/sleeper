@@ -264,7 +264,7 @@ invariant is tested by killing a transaction mid-write and asserting nothing sur
 |---|---|
 | **Bedrock — Titan Text Embeddings V2** (`InvokeModel`) | Embeds every event on write and every arc summary before retrieval. 1024 dimensions, matching `VECTOR(1024)`. |
 | **Bedrock — Claude** (`Converse`) | Rolls a multi-year event history into one behavioural arc summary, then composes the hold rationale and the distro advisory. |
-| **Lambda** | Hosts the agent loop (`src/handler.ts`) behind a public Function URL, webhook-triggered: one event arrives, is embedded, written, and assessed against everything already in memory. `src/lambda.ts` is the entry adapter and owns the route policy — `POST /` and `POST /ingest` assess, `GET /health` is a liveness probe, and **`replayHandler` is deliberately not exposed**, because it resets and re-ingests the whole corpus and would be a public wipe button for the memory the demo depends on. Deployed by `scripts/deploy-aws.sh` (idempotent, `--dry-run` prints every call). |
+| **Lambda** | Hosts the agent loop (`src/handler.ts`), webhook-triggered: one event arrives, is embedded, written, and assessed against everything already in memory. `src/lambda.ts` is the entry adapter and owns the route policy — `POST /` and `POST /ingest` assess, `GET /health` is a liveness probe, and **`replayHandler` is deliberately not exposed**, because it resets and re-ingests the whole corpus and would be a public wipe button for the memory the demo depends on. Deployed by `scripts/deploy-aws.sh` (idempotent, `--dry-run` prints every call) to `arn:aws:lambda:us-east-1:692048575522:function:sleeper`; `aws lambda invoke` on `/health` returns `{"ok":true}`. A Function URL exists but returns 403 — see Known gaps. |
 
 ## 📊 Engineering Rigor
 
@@ -448,12 +448,30 @@ tarball diffing is described in the architecture but is not wired in this build.
 
 Known gaps, stated rather than buried:
 
-- **The Lambda is not deployed yet.** The deploy path is complete and executable — `src/lambda.ts`
-  is the Function URL adapter, `scripts/deploy-aws.sh` provisions the role, bundles, ships and
-  returns a public URL, and `--dry-run` prints every AWS call it would make. The bundle builds
-  (368 KB) and its `handler` has been invoked locally against a real cluster across all of its
-  routes. What has not happened is the deploy itself: this project has no funded AWS account
-  attached yet. Nothing here claims a URL that does not answer.
+- **The Lambda is deployed, but its public URL is blocked and its inference path cannot run.**
+  Three separate facts, kept apart because collapsing them would overstate one and hide another:
+
+  1. **Deployed and executing.** `scripts/deploy-aws.sh` shipped it to
+     `arn:aws:lambda:us-east-1:692048575522:function:sleeper` (nodejs22.x, 1024 MB, 60 s, 368 KB
+     bundle, State `Active`). `aws lambda invoke` against `/health` returns
+     `{"statusCode":200,...,"body":"{\"ok\":true}"}`. That is the function running on AWS, and it
+     is reproducible with one command.
+  2. **The public Function URL returns 403.** The URL exists with `AuthType: NONE` and a resource
+     policy granting `lambda:InvokeFunctionUrl` to `*` — both verified — and it still refuses every
+     request. This is an account-level restriction, not a misconfiguration on our side.
+  3. **The inference path cannot complete.** Amazon Bedrock is blocked account-wide on this
+     account: every `InvokeModel`/`Converse` call, for Amazon Titan, Amazon Nova *and* Anthropic
+     models, in both `us-east-1` and `us-west-2`, returns
+     `ValidationException: Error 002: Access to Bedrock models is not allowed for this account` —
+     including from the Bedrock console's own playground. The Anthropic use case form is submitted
+     and on file, and `GetFoundationModelAvailability` reports `AUTHORIZED`/`AVAILABLE`. So
+     `GET /health` answers, and the read paths reach CockroachDB Cloud, but `POST /` cannot embed.
+
+  What this means for the numbers in this repo: no figure here was produced by Bedrock. Every
+  embedding in the live cluster carries `embedding_model = offline-fnv1a-1024`, and the one row in
+  `release_hold` is from the preview lane and says `[TEMPLATED TEXT — NOT MODEL OUTPUT]` in its own
+  `reason` column. The code path for real inference is written and unit-tested; it has never been
+  executed against Bedrock, and nothing in this README should be read as claiming otherwise.
 - **"Read-only at the protocol layer" was wrong, and is now stated correctly.** The first live run
   measured it: `tools/list` is *not* role-filtered — `create_database`, `create_table` and
   `insert_rows` are advertised to every identity, including one that cannot execute a single call —
