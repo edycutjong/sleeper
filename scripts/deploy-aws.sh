@@ -10,9 +10,14 @@
 #
 set -euo pipefail
 
-FUNCTION_NAME="${FUNCTION_NAME:-sleeper-release-gate}"
+FUNCTION_NAME="${FUNCTION_NAME:-sleeper}"
 ROLE_NAME="${ROLE_NAME:-sleeper-lambda-role}"
-REGION="${AWS_REGION:-ap-southeast-3}"
+# us-east-1, and it is not an arbitrary default. This script used to say ap-southeast-3, which
+# disagreed with src/config.ts (us-east-1) and .env.example (us-east-1) — and would have failed
+# twice over: Bedrock is not offered in ap-southeast-3 at all, and BEDROCK_CHAT_MODEL_ID below is
+# a `us.` cross-region inference profile, which only resolves inside US regions. The function has
+# to live where the models it calls actually exist.
+REGION="${AWS_REGION:-us-east-1}"
 RUNTIME="nodejs22.x"
 TIMEOUT=60
 MEMORY=1024
