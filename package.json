@@ -27,7 +27,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1110.0",
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "dotenv": "^17.4.2",
     "pg": "^8.13.0"
   },
